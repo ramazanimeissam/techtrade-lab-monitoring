@@ -1,0 +1,132 @@
+PLAN-200 Lektion 12 - Cheatsheet SNMP / Zabbix / Wartung
+==========================================================
+
+SYSTEME
+  R1 (VyOS)  eth1 10.10.100.1 (Mgmt)  eth2 10.10.20.1 (Server)  eth0 DHCP (Internet)
+  SRV-MON    10.10.100.20   Zabbix: Firefox -> http://localhost:8080  (Admin / zabbix)
+  SRV-WEB    10.10.20.13    nginx 80/443, Zabbix agent2 Port 10050
+
+----------------------------------------------------------------------
+AUFTRAG 0 - SNMPv2c analysieren (auf SRV-MON)
+----------------------------------------------------------------------
+  Aufzeichnen (Terminal 1, mit Ctrl+C beenden):
+    sudo tcpdump -i ens3 -w ~/snmp-v2c.pcap udp port 161
+  Abfragen (Terminal 2):
+    snmpget  -v2c -c techtrade-ro 10.10.100.1 SNMPv2-MIB::sysDescr.0 SNMPv2-MIB::sysUpTime.0
+    snmpwalk -v2c -c techtrade-ro 10.10.100.1 IF-MIB::ifName
+  In Wireshark oeffnen:
+    wireshark ~/snmp-v2c.pcap &
+
+----------------------------------------------------------------------
+AUFTRAG 1 - SNMPv3 auf R1
+----------------------------------------------------------------------
+  Auf R1 (Werte selbst einsetzen, Optionen mit ? anzeigen):
+    configure
+    set service snmp v3 engineid '000000000000000000000001'
+    set service snmp v3 view <view> oid 1
+    set service snmp v3 group <gruppe> mode ro
+    set service snmp v3 group <gruppe> view <view>
+    set service snmp v3 user <user> auth type <?>
+    set service snmp v3 user <user> auth plaintext-password '<passwort>'
+    set service snmp v3 user <user> privacy type <?>
+    set service snmp v3 user <user> privacy plaintext-password '<passwort>'
+    set service snmp v3 user <user> group <gruppe>
+    commit
+    save
+    exit
+    show configuration commands | match snmp
+
+  Test auf SRV-MON:
+    snmpget -v3 -l authPriv -u <user> -a SHA -A '<authpasswort>' \
+            -x AES -X '<privpasswort>' 10.10.100.1 SNMPv2-MIB::sysName.0
+  Aufzeichnen wie in Auftrag 0, Datei z. B. ~/snmp-v3.pcap
+
+----------------------------------------------------------------------
+AUFTRAG 2 - Hosts in Zabbix
+----------------------------------------------------------------------
+  Agent pruefen (auf SRV-MON):    zabbix_get -s 10.10.20.13 -k agent.ping     -> 1
+
+  Zabbix-Menuepfade (7.0):
+    Host anlegen:    Data collection -> Hosts -> Create host
+    Web-Szenario:    Data collection -> Hosts -> SRV-WEB -> Web -> Create web scenario
+    Trigger:         Data collection -> Hosts -> SRV-WEB -> Triggers -> Create trigger
+    Status:          Monitoring -> Hosts | Monitoring -> Web | Monitoring -> Latest data
+
+  Trigger-Ausdruck Web-Szenario:
+    last(/SRV-WEB/web.test.fail[Shop])<>0
+
+  SNMPv2c auf R1 entfernen (erst wenn v3 in Zabbix laeuft):
+    configure
+    delete service snmp community techtrade-ro
+    commit
+    save
+    exit
+  Gegenprobe auf SRV-MON (muss scheitern / Timeout):
+    snmpget -v2c -c techtrade-ro 10.10.100.1 SNMPv2-MIB::sysName.0
+
+----------------------------------------------------------------------
+AUFTRAG 3 - Wartungsbedarf Netz (auf R1)
+----------------------------------------------------------------------
+    show version
+    show system uptime
+    show interfaces ethernet eth1
+    show interfaces ethernet eth2
+    show ntp
+    show system commit
+    show configuration commands
+  In Zabbix: Monitoring -> Latest data -> Host R1
+
+----------------------------------------------------------------------
+AUFTRAG 4 - Wartungsbedarf Plattform (auf SRV-WEB)
+----------------------------------------------------------------------
+  Befunde:
+    apt list --upgradable
+    apt list --upgradable 2>/dev/null | grep -c -- -security
+    ls /var/run/reboot-required
+    lsb_release -a
+    nginx -v
+    dpkg -l techtrade-shop
+    openssl x509 -enddate -noout -in /etc/ssl/techtrade/shop.crt
+    df -h /
+    sudo du -sh /var/log
+
+  Eigene Keys - Datei anlegen:
+    sudo nano /etc/zabbix/zabbix_agent2.d/userparameter_wartung.conf
+  Syntax:   UserParameter=<key>,<shell-befehl>
+  Vorlage fuer den ersten Key (eine Zeile):
+    UserParameter=wartung.cert_days_left,echo $(( ($(date -d "$(openssl x509 -enddate -noout -in /etc/ssl/techtrade/shop.crt | cut -d= -f2)" +%s) - $(date +%s)) / 86400 ))
+
+  Agent neu starten und testen:
+    sudo systemctl restart zabbix-agent2
+    zabbix_agent2 -t wartung.cert_days_left
+    journalctl -u zabbix-agent2 -n 30
+  Von SRV-MON:
+    zabbix_get -s 10.10.20.13 -k wartung.cert_days_left
+
+  Item anlegen:    Data collection -> Hosts -> SRV-WEB -> Items -> Create item
+                   Type: Zabbix agent, Key: <key>, Type of information: Numeric (unsigned)
+  Trigger-Bsp.:    last(/SRV-WEB/wartung.cert_days_left)<30
+  Alarme:          Monitoring -> Problems
+
+----------------------------------------------------------------------
+AUFTRAG 6 - Lastdaten (auf SRV-MON)
+----------------------------------------------------------------------
+    localc ~/lab/shop_last_7x24.csv &
+  Trennzeichen: Semikolon. Diagramm: Daten markieren -> Einfuegen -> Diagramm
+
+----------------------------------------------------------------------
+AUFTRAG 7 - Release und Rollback
+----------------------------------------------------------------------
+  Maintenance:     Data collection -> Maintenance -> Create maintenance period
+                   Tab "Hosts and groups": Host waehlen | Tab "Periods": One time only
+
+  Auf SRV-WEB:
+    dpkg -l techtrade-shop                                       installiertes Release
+    ls /opt/lab/release/                                         verfuegbare Releases
+    sudo apt install /opt/lab/release/techtrade-shop_1.1_all.deb
+    curl http://10.10.20.13/
+  Rollback:
+    sudo apt install --allow-downgrades /opt/lab/release/techtrade-shop_1.0_all.deb
+
+  R1 neu starten (auf R1):
+    reboot

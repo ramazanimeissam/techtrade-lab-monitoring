@@ -1,0 +1,19 @@
+configure
+set system host-name R1
+set interfaces ethernet eth0 address dhcp
+set interfaces ethernet eth0 description WAN
+set interfaces ethernet eth1 address 10.10.100.1/24
+set interfaces ethernet eth1 description MGMT
+set interfaces ethernet eth2 address 10.10.20.1/24
+set interfaces ethernet eth2 description SERVER
+set nat source rule 10 outbound-interface name eth0
+set nat source rule 10 source address 10.10.0.0/16
+set nat source rule 10 translation address masquerade
+set system name-server 1.1.1.1
+set service snmp community techtrade-ro authorization ro
+set service snmp community techtrade-ro client 10.10.100.20
+set service snmp location 'TechTrade RZ Zuerich'
+set service snmp contact 'it@techtrade.lab'
+commit
+save
+exit
