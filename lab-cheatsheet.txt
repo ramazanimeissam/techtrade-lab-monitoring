@@ -14,13 +14,13 @@ SYSTEME
   SRV-WEB    10.10.20.13    nginx 80/443, Zabbix agent2 Port 10050
 
 ----------------------------------------------------------------------
-AUFTRAG 0 - SNMPv2c abfragen (auf SRV-MON)
+AUFTRAG 1 - SNMPv2c abfragen (auf SRV-MON)
 ----------------------------------------------------------------------
     snmpget  -v2c -c techtrade-ro 10.10.100.1 sysDescr.0 sysUpTime.0
     snmpwalk -v2c -c techtrade-ro 10.10.100.1 ifName
 
 ----------------------------------------------------------------------
-AUFTRAG 1 - SNMPv3 auf R1
+AUFTRAG 2 - SNMPv3 auf R1
 ----------------------------------------------------------------------
   Auf R1 (Werte selbst einsetzen, Optionen mit ? anzeigen):
     configure
@@ -44,7 +44,7 @@ AUFTRAG 1 - SNMPv3 auf R1
     snmpget -v3 -l authPriv -u <user> -a SHA -A <authpasswort> -x AES -X <privpasswort> 10.10.100.1 sysName.0
 
 ----------------------------------------------------------------------
-AUFTRAG 2 - Hosts in Zabbix
+AUFTRAG 3 - Hosts in Zabbix
 ----------------------------------------------------------------------
   Agent prüfen (auf SRV-MON):
     zabbix_get -s 10.10.20.13 -k agent.ping          -> 1
@@ -87,7 +87,7 @@ AUFTRAG 2 - Hosts in Zabbix
   Danach: Latest data -> Items anhaken -> Execute now
 
 ----------------------------------------------------------------------
-AUFTRAG 3 - Wartungsbedarf Netz
+AUFTRAG 4 - Wartungsbedarf Netz
 ----------------------------------------------------------------------
   In Zabbix: Monitoring -> Latest data, Hosts = R1,
   Suchbegriff ins Feld "Name" -> Apply:
@@ -107,7 +107,7 @@ AUFTRAG 3 - Wartungsbedarf Netz
     show system commit
 
 ----------------------------------------------------------------------
-AUFTRAG 4 - Wartungsbedarf Plattform (auf SRV-WEB)
+AUFTRAG 5 - Wartungsbedarf Plattform (auf SRV-WEB)
 ----------------------------------------------------------------------
   Befunde:
     apt list --upgradable
