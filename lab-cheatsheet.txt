@@ -1,3 +1,10 @@
+Frage) Wann Push und wann Pull verwenden?
+
+Faustregel: Poll für Zustand und Trends, Push für dringende Events. In der Praxis nutzt man beides.
+Geräte hinter NAT oder Firewall, die der Server nicht erreicht
+
+
+
 PLAN-200 Lektion 12 - Cheatsheet SNMP / Zabbix / Wartung
 ==========================================================
 
@@ -7,74 +14,97 @@ SYSTEME
   SRV-WEB    10.10.20.13    nginx 80/443, Zabbix agent2 Port 10050
 
 ----------------------------------------------------------------------
-AUFTRAG 0 - SNMPv2c analysieren (auf SRV-MON)
+AUFTRAG 0 - SNMPv2c abfragen (auf SRV-MON)
 ----------------------------------------------------------------------
-  Aufzeichnen (Terminal 1, mit Ctrl+C beenden):
-    sudo tcpdump -i ens3 -w ~/snmp-v2c.pcap udp port 161
-  Abfragen (Terminal 2):
-    snmpget  -v2c -c techtrade-ro 10.10.100.1 SNMPv2-MIB::sysDescr.0 SNMPv2-MIB::sysUpTime.0
-    snmpwalk -v2c -c techtrade-ro 10.10.100.1 IF-MIB::ifName
-  In Wireshark oeffnen:
-    wireshark ~/snmp-v2c.pcap &
+    snmpget  -v2c -c techtrade-ro 10.10.100.1 sysDescr.0 sysUpTime.0
+    snmpwalk -v2c -c techtrade-ro 10.10.100.1 ifName
 
 ----------------------------------------------------------------------
 AUFTRAG 1 - SNMPv3 auf R1
 ----------------------------------------------------------------------
   Auf R1 (Werte selbst einsetzen, Optionen mit ? anzeigen):
     configure
-    set service snmp v3 engineid '000000000000000000000001'
+    set service snmp v3 engineid 000000000000000000000001
     set service snmp v3 view <view> oid 1
     set service snmp v3 group <gruppe> mode ro
     set service snmp v3 group <gruppe> view <view>
-    set service snmp v3 user <user> auth type <?>
-    set service snmp v3 user <user> auth plaintext-password '<passwort>'
-    set service snmp v3 user <user> privacy type <?>
-    set service snmp v3 user <user> privacy plaintext-password '<passwort>'
     set service snmp v3 user <user> group <gruppe>
+    set service snmp v3 user <user> auth type <?>
+    set service snmp v3 user <user> auth plaintext-password <passwort>
+    set service snmp v3 user <user> privacy type <?>
+    set service snmp v3 user <user> privacy plaintext-password <passwort>
     commit
     save
     exit
     show configuration commands | match snmp
 
+  Engine-ID: 23 Nullen, dann eine 1 (24 Zeichen).
+
   Test auf SRV-MON:
-    snmpget -v3 -l authPriv -u <user> -a SHA -A '<authpasswort>' \
-            -x AES -X '<privpasswort>' 10.10.100.1 SNMPv2-MIB::sysName.0
-  Aufzeichnen wie in Auftrag 0, Datei z. B. ~/snmp-v3.pcap
+    snmpget -v3 -l authPriv -u <user> -a SHA -A <authpasswort> -x AES -X <privpasswort> 10.10.100.1 sysName.0
 
 ----------------------------------------------------------------------
 AUFTRAG 2 - Hosts in Zabbix
 ----------------------------------------------------------------------
-  Agent pruefen (auf SRV-MON):    zabbix_get -s 10.10.20.13 -k agent.ping     -> 1
+  Agent prüfen (auf SRV-MON):
+    zabbix_get -s 10.10.20.13 -k agent.ping          -> 1
 
-  Zabbix-Menuepfade (7.0):
+  Zabbix-Menüpfade (7.0):
     Host anlegen:    Data collection -> Hosts -> Create host
-    Web-Szenario:    Data collection -> Hosts -> SRV-WEB -> Web -> Create web scenario
-    Trigger:         Data collection -> Hosts -> SRV-WEB -> Triggers -> Create trigger
-    Status:          Monitoring -> Hosts | Monitoring -> Web | Monitoring -> Latest data
+    Web-Szenario:    Data collection -> Hosts -> Zeile SRV-WEB -> Web
+                     -> Create web scenario
+    Trigger:         Data collection -> Hosts -> Zeile SRV-WEB -> Triggers
+                     -> Create trigger
+    Status:          Monitoring -> Hosts (Symbole SNMP / ZBX grün?)
+    Werte:           Monitoring -> Latest data
+    Web-Ergebnis:    Monitoring -> Hosts -> Zeile SRV-WEB -> Web
+
+  Web-Szenario ausfüllen:
+    Tab "Scenario":  Name, Update interval
+    Tab "Steps":     Add -> Name, URL, Required string,
+                     Required status codes -> Add
+    Danach unten:    Add
+
+  Discovery sofort ausführen (sonst erst nach bis zu 1 Stunde):
+    Data collection -> Hosts -> Zeile R1 -> Discovery
+    -> alle Regeln anhaken -> Execute now
 
   Trigger-Ausdruck Web-Szenario:
     last(/SRV-WEB/web.test.fail[Shop])<>0
 
-  SNMPv2c auf R1 entfernen (erst wenn v3 in Zabbix laeuft):
+  SNMPv2c auf R1 entfernen (erst wenn v3 in Zabbix läuft):
     configure
     delete service snmp community techtrade-ro
     commit
     save
     exit
   Gegenprobe auf SRV-MON (muss scheitern / Timeout):
-    snmpget -v2c -c techtrade-ro 10.10.100.1 SNMPv2-MIB::sysName.0
+    snmpget -v2c -c techtrade-ro 10.10.100.1 sysName.0
+
+  Werte von R1 bleiben danach stehen / "Not supported"?
+  (snmpd auf R1 wurde neu gestartet, Zabbix hat alte SNMPv3-Daten im Cache)
+    sudo docker exec zabbix-server-1 zabbix_server -R snmp_cache_reload
+  Danach: Latest data -> Items anhaken -> Execute now
 
 ----------------------------------------------------------------------
-AUFTRAG 3 - Wartungsbedarf Netz (auf R1)
+AUFTRAG 3 - Wartungsbedarf Netz
 ----------------------------------------------------------------------
+  In Zabbix: Monitoring -> Latest data, Hosts = R1,
+  Suchbegriff ins Feld "Name" -> Apply:
+    description    Softwarestand
+    uptime         Laufzeit
+    errors         Fehler auf den Interfaces
+    discarded      Verwürfe auf den Interfaces
+    memory         Speicher
+    space          Disk
+  Items ohne Daten: Subfilter "Not supported", Spalte Info zeigt den Grund
+
+  Auf R1:
     show version
     show system uptime
     show interfaces ethernet eth1
-    show interfaces ethernet eth2
     show ntp
     show system commit
-    show configuration commands
-  In Zabbix: Monitoring -> Latest data -> Host R1
 
 ----------------------------------------------------------------------
 AUFTRAG 4 - Wartungsbedarf Plattform (auf SRV-WEB)
@@ -91,9 +121,9 @@ AUFTRAG 4 - Wartungsbedarf Plattform (auf SRV-WEB)
     sudo du -sh /var/log
 
   Eigene Keys - Datei anlegen:
-    sudo nano /etc/zabbix/zabbix_agent2.d/userparameter_wartung.conf
+    sudo nano /etc/zabbix/zabbix_agent2.d/wartung.conf
   Syntax:   UserParameter=<key>,<shell-befehl>
-  Vorlage fuer den ersten Key (eine Zeile):
+  Vorlage für den ersten Key (eine Zeile):
     UserParameter=wartung.cert_days_left,echo $(( ($(date -d "$(openssl x509 -enddate -noout -in /etc/ssl/techtrade/shop.crt | cut -d= -f2)" +%s) - $(date +%s)) / 86400 ))
 
   Agent neu starten und testen:
@@ -103,30 +133,10 @@ AUFTRAG 4 - Wartungsbedarf Plattform (auf SRV-WEB)
   Von SRV-MON:
     zabbix_get -s 10.10.20.13 -k wartung.cert_days_left
 
-  Item anlegen:    Data collection -> Hosts -> SRV-WEB -> Items -> Create item
-                   Type: Zabbix agent, Key: <key>, Type of information: Numeric (unsigned)
+  Item anlegen:    Data collection -> Hosts -> Zeile SRV-WEB -> Items
+                   -> Create item
+                   Type: Zabbix agent, Key: <key>,
+                   Type of information: Numeric (unsigned)
   Trigger-Bsp.:    last(/SRV-WEB/wartung.cert_days_left)<30
   Alarme:          Monitoring -> Problems
 
-----------------------------------------------------------------------
-AUFTRAG 6 - Lastdaten (auf SRV-MON)
-----------------------------------------------------------------------
-    localc ~/lab/shop_last_7x24.csv &
-  Trennzeichen: Semikolon. Diagramm: Daten markieren -> Einfuegen -> Diagramm
-
-----------------------------------------------------------------------
-AUFTRAG 7 - Release und Rollback
-----------------------------------------------------------------------
-  Maintenance:     Data collection -> Maintenance -> Create maintenance period
-                   Tab "Hosts and groups": Host waehlen | Tab "Periods": One time only
-
-  Auf SRV-WEB:
-    dpkg -l techtrade-shop                                       installiertes Release
-    ls /opt/lab/release/                                         verfuegbare Releases
-    sudo apt install /opt/lab/release/techtrade-shop_1.1_all.deb
-    curl http://10.10.20.13/
-  Rollback:
-    sudo apt install --allow-downgrades /opt/lab/release/techtrade-shop_1.0_all.deb
-
-  R1 neu starten (auf R1):
-    reboot
