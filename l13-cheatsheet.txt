@@ -1,0 +1,285 @@
+PLAN-200 Lektion 13 - Cheatsheet Prometheus / Grafana / Kennzahlen
+=====================================================================
+
+SYSTEME
+  R1 (VyOS)  eth1 10.10.100.1 (Mgmt)  eth2 10.10.20.1 (Server)  eth0 DHCP (Internet)
+             SNMPv3: Benutzer zbxmon, SHA / TechTrade-Auth1, AES / TechTrade-Priv1
+  SRV-MON    10.10.100.20
+             Prometheus  Firefox -> http://localhost:9090
+             Grafana     Firefox -> http://localhost:3000   (admin / Gns3456)
+             Zabbix      Firefox -> http://localhost:8080   (Admin / zabbix)
+  SRV-WEB    10.10.20.13  Shop (nginx 80/443), node_exporter :9100, iperf3-Server
+
+DATEIEN UND HILFSBEFEHLE (auf SRV-MON, ohne sudo)
+  ~/monitoring/prometheus.yml   Was Prometheus abfragt (Ziele, Intervalle)
+  ~/monitoring/snmp-auth.yml    SNMP-Zugangsdaten fuer den snmp_exporter
+  ~/monitoring/blackbox.yml     Pruefungen fuer den Shop (nur lesen)
+  prom-check                    prometheus.yml auf Fehler pruefen
+  prom-reload                   prometheus.yml neu laden
+  snmp-reload                   snmp-auth.yml neu laden
+
+  Cheatsheet im Editor oeffnen (zum Kopieren):  mousepad ~/lab-cheatsheet.txt &
+  YAML: nur Leerzeichen, keine Tabs. Einrueckung genau wie unten.
+
+----------------------------------------------------------------------
+AUFTRAG 1 - Kennzahlenkatalog
+----------------------------------------------------------------------
+  Keine Befehle. Begriffe:
+    Aktive Messung   = Monitoring stellt selbst eine Anfrage (Probe, Ping)
+    Passive Messung  = Monitoring liest Zaehler/Werte des Systems (SNMP, Agent)
+    Warnung          = handeln, bevor es weh tut
+    Kritisch         = Vorgabe (z. B. OLA) verletzt oder unmittelbar gefaehrdet
+
+----------------------------------------------------------------------
+AUFTRAG 2 - Prometheus in Betrieb nehmen, SRV-WEB aufnehmen
+----------------------------------------------------------------------
+  Ziele ansehen:   Prometheus -> Status -> Target health
+  Abfragen:        Prometheus -> Query  (Abfrage eingeben, Execute,
+                   Tab "Table" oder "Graph")
+
+  Exporter auf SRV-WEB direkt ansehen (auf SRV-MON):
+    curl -s http://10.10.20.13:9100/metrics | grep node_load
+
+  Job ergaenzen (auf SRV-MON):
+    nano ~/monitoring/prometheus.yml
+  Ganz unten anfuegen:
+
+  - job_name: node
+    static_configs:
+      - targets: ['10.10.20.13:9100']
+
+    prom-check
+    prom-reload
+
+  Abfragen:
+    up
+    100 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100
+    100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+    100 * (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})
+
+  Aufbewahrungsdauer:  Status -> Runtime & build information
+                       -> Zeile "Storage retention"
+
+----------------------------------------------------------------------
+AUFTRAG 3 - Netz messen: R1 ueber SNMPv3
+----------------------------------------------------------------------
+  Zugangsdaten eintragen (auf SRV-MON):
+    nano ~/monitoring/snmp-auth.yml
+  Zeile "auths: {}" ersetzen durch:
+
+auths:
+  techtrade_v3:
+    version: 3
+    username: zbxmon
+    security_level: authPriv
+    auth_protocol: SHA
+    password: TechTrade-Auth1
+    priv_protocol: AES
+    priv_password: TechTrade-Priv1
+
+    snmp-reload
+
+  snmp_exporter von Hand testen (auf SRV-MON):
+    curl -s "http://localhost:9116/snmp?target=10.10.100.1&module=if_mib&auth=techtrade_v3" | grep ifHCInOctets
+
+  Job ergaenzen:  nano ~/monitoring/prometheus.yml  -> ganz unten anfuegen:
+
+  - job_name: snmp
+    metrics_path: /snmp
+    params:
+      module: [if_mib]
+      auth: [techtrade_v3]
+    static_configs:
+      - targets: ['10.10.100.1']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: localhost:9116
+
+    prom-check
+    prom-reload
+
+  Abfragen:
+    ifHCInOctets{job="snmp"}                                  Zaehler (steigt nur)
+    rate(ifHCInOctets{job="snmp"}[1m]) * 8                    bit/s eingehend
+    rate(ifHCOutOctets{job="snmp", ifName="eth2"}[1m]) * 8    bit/s ins Server-Segment
+    rate(ifHCOutOctets{job="snmp", ifName="eth2"}[1m]) * 8 / 100e6 * 100
+                                                              Auslastung % bei 100 Mbit/s
+    rate(ifInErrors{job="snmp"}[5m])                          Fehler pro Sekunde
+    ifHighSpeed{job="snmp"}                                   gemeldete Geschwindigkeit (Mbit/s)
+
+  Lasttest (auf SRV-MON), 50 Mbit/s waehrend 60 Sekunden:
+    iperf3 -c 10.10.20.13 -b 50M -t 60
+
+  Zaehler auf R1 vor und nach dem Lasttest ablesen:
+    show interfaces ethernet eth2
+  (Zeile TX: bytes)  ->  Mbit/s = (bytes_nachher - bytes_vorher) * 8 / Sekunden / 1000000
+
+----------------------------------------------------------------------
+AUFTRAG 4 - Shop messen: Verfuegbarkeit, Antwortzeit, Zertifikat
+----------------------------------------------------------------------
+  blackbox_exporter von Hand testen (auf SRV-MON):
+    curl -s "http://localhost:9115/probe?module=shop_http&target=http://10.10.20.13/" | grep -E "probe_success|probe_duration"
+
+  Jobs ergaenzen:  nano ~/monitoring/prometheus.yml  -> ganz unten anfuegen:
+
+  - job_name: shop
+    scrape_interval: 5s
+    metrics_path: /probe
+    params:
+      module: [shop_http]
+    static_configs:
+      - targets: ['http://10.10.20.13/']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: localhost:9115
+
+  - job_name: shop_tls
+    metrics_path: /probe
+    params:
+      module: [shop_https]
+    static_configs:
+      - targets: ['https://10.10.20.13/']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: localhost:9115
+
+    prom-check
+    prom-reload
+
+  Abfragen:
+    probe_success{job="shop"}                                  1 = ok, 0 = Fehler
+    avg_over_time(probe_success{job="shop"}[1h]) * 100         Verfuegbarkeit % letzte Stunde
+    probe_duration_seconds{job="shop"}                         Antwortzeit in Sekunden
+    probe_http_status_code{job="shop"}
+    (probe_ssl_earliest_cert_expiry{job="shop_tls"} - time()) / 86400
+                                                               Zertifikat: Resttage
+
+  Gegenprobe Antwortzeit (auf SRV-MON):
+    curl -o /dev/null -s -w '%{http_code} %{time_total}\n' http://10.10.20.13/
+  Gegenprobe Zertifikat (auf SRV-WEB):
+    openssl x509 -enddate -noout -in /etc/ssl/techtrade/shop.crt
+    date
+
+----------------------------------------------------------------------
+AUFTRAG 5 - Dashboard in Grafana
+----------------------------------------------------------------------
+  Anmelden:        Firefox -> http://localhost:3000   admin / Gns3456
+  Datenquelle:     Connections -> Data sources -> Add new data source
+                   -> Prometheus
+                   Prometheus server URL: http://localhost:9090
+                   -> ganz unten Save & test
+  Dashboard:       Dashboards -> New -> New dashboard -> Add visualization
+                   -> Datenquelle prometheus waehlen
+  Abfrage:         Im Abfragefeld von "Builder" auf "Code" umschalten,
+                   PromQL einfuegen, "Run queries"
+  Typ:             rechts oben Visualisierung waehlen (Time series, Stat, Gauge)
+  Rechte Spalte:   Title
+                   Standard options -> Unit
+                   Standard options -> Min / Max
+                   Thresholds -> Base + Werte, Farben
+                   (Time series zusaetzlich: Show thresholds -> As lines)
+  Speichern:       oben rechts Save dashboard
+
+  Abfragen fuer die Panels:
+    Shop Verfuegbarkeit (Stat, Unit Percent 0-100, Zeitraum oben rechts = Messperiode):
+      avg_over_time(probe_success{job="shop"}[$__range]) * 100
+    Shop Antwortzeit (Time series, Unit seconds):
+      probe_duration_seconds{job="shop"}
+    Zertifikat Resttage (Stat, Unit days):
+      (probe_ssl_earliest_cert_expiry{job="shop_tls"} - time()) / 86400
+    Auslastung Server-Segment (Time series, Unit Percent 0-100, Max 100):
+      rate(ifHCOutOctets{job="snmp", ifName="eth2"}[1m]) * 8 / 100e6 * 100
+    Interface-Fehler R1 (Time series):
+      rate(ifInErrors{job="snmp"}[5m]) + rate(ifOutErrors{job="snmp"}[5m])
+    SRV-WEB CPU % (Time series, Unit Percent 0-100):
+      100 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100
+    SRV-WEB Disk / belegt % (Gauge, Unit Percent 0-100):
+      100 * (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})
+
+  Legende statt langer Labels:  Options -> Legend -> Custom -> {{ifName}}
+
+  Dashboard als Datei:  Export -> Export as JSON  (oben rechts)
+
+----------------------------------------------------------------------
+AUFTRAG 6 - Release 1.2 einspielen und ueberwachen
+----------------------------------------------------------------------
+  Zeitraum im Dashboard oben rechts: Last 15 minutes, Refresh 5s
+
+  Annotation setzen:  im Time-series-Panel Strg + Klick auf den Zeitpunkt
+                      -> Text eingeben -> Save
+
+  Panel fuer kurze Fenster (Time series, Unit Percent 0-100):
+    avg_over_time(probe_success{job="shop"}[5m]) * 100
+
+  Release einspielen (auf SRV-WEB):
+    ls /opt/lab/release/
+    sudo dpkg -i /opt/lab/release/techtrade-shop_1.2_all.deb
+    dpkg -l techtrade-shop | tail -1
+
+  Einzeltest von Hand (auf SRV-MON), mehrmals ausfuehren:
+    curl -s -o /dev/null -w '%{http_code}\n' http://10.10.20.13/
+
+  Rollback (auf SRV-WEB):
+    sudo dpkg -i /opt/lab/release/techtrade-shop_1.0_all.deb
+    dpkg -l techtrade-shop | tail -1
+
+  Ursache ansehen (auf SRV-WEB):
+    dpkg -L techtrade-shop
+    cat /etc/nginx/conf.d/techtrade-shop.conf
+    sudo tail /var/log/nginx/access.log
+
+----------------------------------------------------------------------
+AUFTRAG 7 - Zabbix und Prometheus im Vergleich
+----------------------------------------------------------------------
+  Lasttest (auf SRV-MON):
+    iperf3 -c 10.10.20.13 -b 50M -t 180
+
+  Frage: Gesamtverkehr ueber alle Interfaces von R1 waehrend des Tests
+
+  Prometheus -> Query -> Graph, Zeitraum so waehlen, dass der Test drin ist:
+    sum(rate(ifHCInOctets{job="snmp"}[1m])) * 8
+
+  Zabbix:
+    Einzelwerte:   Monitoring -> Latest data, Hosts = R1,
+                   Name = "Bits received" -> Apply -> Graph
+    Summe als eigenes Item:
+                   Data collection -> Hosts -> Zeile R1 -> Items -> Create item
+                   Name:                R1 Verkehr eingehend total
+                   Type:                Calculated
+                   Key:                 r1.traffic.in.total
+                   Formula:             sum(last_foreach(/R1/net.if.in[*]))
+                   Type of information: Numeric (float)
+                   Units:               bps
+                   Update interval:     1m
+                   -> Add, danach Monitoring -> Latest data -> Graph
+
+  Frage: Welche Software-Version laeuft auf R1?
+  Zabbix:      Monitoring -> Latest data, Hosts = R1, Name = "description"
+  Prometheus:  Query -> {job="snmp", __name__=~"sys.*"}
+               (Weitere SNMP-Werte holt der snmp_exporter nur, wenn das
+                passende Modul im Job steht, z. B. module: [if_mib, system])
+
+  Frage: Verfuegbarkeit neu definiert ("verfuegbar = Antwort ok UND
+         schneller als 100 ms"), Wert fuer die letzte Stunde
+  Prometheus:
+    avg_over_time((probe_success{job="shop"} * (probe_duration_seconds{job="shop"} < bool 0.1))[1h:5s]) * 100
+  Zabbix:
+    Data collection -> Hosts -> Zeile SRV-WEB -> Web -> Shop -> Steps
+    -> Startseite -> Timeout
+    Monitoring -> Hosts -> Zeile SRV-WEB -> Web -> Shop  (Verlauf ansehen)
+
+  Was Zabbix ohne Zusatzaufwand bereits liefert:
+    Monitoring -> Problems
+    Monitoring -> Hosts -> Zeile R1 -> Dashboards

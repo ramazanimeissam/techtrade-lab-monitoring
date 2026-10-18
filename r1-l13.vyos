@@ -1,0 +1,14 @@
+configure
+delete service snmp community techtrade-ro
+set service snmp v3 engineid 000000000000000000000001
+set service snmp v3 view all oid 1
+set service snmp v3 group monitoring mode ro
+set service snmp v3 group monitoring view all
+set service snmp v3 user zbxmon group monitoring
+set service snmp v3 user zbxmon auth type sha
+set service snmp v3 user zbxmon auth plaintext-password TechTrade-Auth1
+set service snmp v3 user zbxmon privacy type aes
+set service snmp v3 user zbxmon privacy plaintext-password TechTrade-Priv1
+commit
+save
+exit
