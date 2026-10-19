@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PLAN-200 L13 Lab-Kit (Prometheus + Grafana, Kennzahlen, Release ueberwachen)
+# PLAN-200 L13 Lab-Kit (Prometheus + Grafana, Kennzahlen, Release überwachen)
 # Baut auf dem fertigen L12-Template auf (R1 mit SNMPv3, Zabbix auf SRV-MON).
 # Aufruf:  sudo bash l13.sh mon   (auf SRV-MON)
 #          sudo bash l13.sh web   (auf SRV-WEB)
@@ -33,14 +33,16 @@ if [[ $ROLE == mon ]]; then
   echo "iperf3 iperf3/start_daemon boolean false" | debconf-set-selections
   $APT install iperf3 jq
 
-  log "Konfigurationsdateien /opt/monitoring/config (Link ~/monitoring)"
+  log "Konfigurationsdateien /etc/prometheus (Compose-Datei in /opt/monitoring)"
   M=/opt/monitoring
-  mkdir -p $M/config
+  C=/etc/prometheus
+  mkdir -p $M $C
 
-  cat > $M/config/prometheus.yml <<'EOF'
+  cat > $C/prometheus.yml <<'EOF'
 # Prometheus-Konfiguration TechTrade AG (SRV-MON)
-# Pruefen:      prom-check
-# Neu laden:    prom-reload
+# Bearbeiten:   sudo nano /etc/prometheus/prometheus.yml
+# Prüfen:       docker exec prometheus promtool check config /config/prometheus.yml
+# Neu laden:    curl -X POST http://localhost:9090/-/reload
 
 global:
   scrape_interval: 15s
@@ -52,14 +54,15 @@ scrape_configs:
       - targets: ['localhost:9090']
 EOF
 
-  cat > $M/config/snmp-auth.yml <<'EOF'
-# SNMP-Zugangsdaten fuer den snmp_exporter (SRV-MON)
-# Neu laden:    snmp-reload
+  cat > $C/snmp-auth.yml <<'EOF'
+# SNMP-Zugangsdaten für den snmp_exporter (SRV-MON)
+# Bearbeiten:   sudo nano /etc/prometheus/snmp-auth.yml
+# Neu laden:    curl -X POST http://localhost:9116/-/reload
 auths: {}
 EOF
 
-  cat > $M/config/blackbox.yml <<'EOF'
-# Module des blackbox_exporter (SRV-MON)
+  cat > $C/blackbox.yml <<'EOF'
+# Module des blackbox_exporter (SRV-MON) - nur lesen
 modules:
   http_2xx:
     prober: http
@@ -94,7 +97,7 @@ services:
       - --storage.tsdb.path=/prometheus
       - --web.enable-lifecycle
     volumes:
-      - /opt/monitoring/config:/config:ro
+      - /etc/prometheus:/config:ro
       - promdata:/prometheus
 
   snmp-exporter:
@@ -106,7 +109,7 @@ services:
       - --config.file=/etc/snmp_exporter/snmp.yml
       - --config.file=/config/snmp-auth.yml
     volumes:
-      - /opt/monitoring/config:/config:ro
+      - /etc/prometheus:/config:ro
 
   blackbox-exporter:
     image: prom/blackbox-exporter:v0.28.0
@@ -116,7 +119,7 @@ services:
     command:
       - --config.file=/config/blackbox.yml
     volumes:
-      - /opt/monitoring/config:/config:ro
+      - /etc/prometheus:/config:ro
 
   grafana:
     image: grafana/grafana:13.1.6
@@ -137,37 +140,14 @@ volumes:
   grafanadata:
 EOF
 
-  chmod 755 $M $M/config
-  chmod 644 $M/config/*.yml
-  chown $U:$U $M/config/*.yml
-  ln -sfn $M/config /home/$U/monitoring
-  chown -h $U:$U /home/$U/monitoring
+  chmod 755 $C
+  chmod 644 $C/*.yml
+  chown root:root $C/*.yml
 
-  log "Hilfsbefehle prom-check, prom-reload, snmp-reload"
-  cat > /usr/local/bin/prom-check <<'EOF'
-#!/bin/sh
-# Prueft ~/monitoring/prometheus.yml auf Fehler
-docker exec prometheus promtool check config /config/prometheus.yml
-EOF
-  cat > /usr/local/bin/prom-reload <<'EOF'
-#!/bin/sh
-# Laedt ~/monitoring/prometheus.yml neu (ohne Neustart)
-OUT=$(mktemp)
-CODE=$(curl -s -o "$OUT" -w '%{http_code}' -X POST http://localhost:9090/-/reload)
-if [ "$CODE" = 200 ]; then echo "OK: Prometheus hat die Konfiguration neu geladen."
-else echo "FEHLER ($CODE):"; cat "$OUT"; echo; rm -f "$OUT"; exit 1; fi
-rm -f "$OUT"
-EOF
-  cat > /usr/local/bin/snmp-reload <<'EOF'
-#!/bin/sh
-# Laedt ~/monitoring/snmp-auth.yml neu (ohne Neustart)
-OUT=$(mktemp)
-CODE=$(curl -s -o "$OUT" -w '%{http_code}' -X POST http://localhost:9116/-/reload)
-if [ "$CODE" = 200 ]; then echo "OK: snmp_exporter hat die Konfiguration neu geladen."
-else echo "FEHLER ($CODE):"; cat "$OUT"; echo; rm -f "$OUT"; exit 1; fi
-rm -f "$OUT"
-EOF
-  chmod 755 /usr/local/bin/prom-check /usr/local/bin/prom-reload /usr/local/bin/snmp-reload
+  # Altlasten aus früheren Kit-Versionen entfernen (falls vorhanden)
+  rm -f /usr/local/bin/prom-check /usr/local/bin/prom-reload /usr/local/bin/snmp-reload
+  rm -f /home/$U/monitoring
+  rm -rf $M/config
 
   log "Prometheus, Exporter und Grafana starten (Images laden, dauert)"
   systemctl enable --now docker
@@ -312,7 +292,7 @@ EOF
     dpkg-deb --build --root-owner-group "$d" "/opt/lab/release/techtrade-shop_$1_all.deb" >/dev/null
     rm -rf "$d"
   }
-  mkpkg 1.0 "TechTrade Shop" "Willkommen im TechTrade Shop. Unser Sortiment: Notebooks, Monitore, Zubehoer." 0
+  mkpkg 1.0 "TechTrade Shop" "Willkommen im TechTrade Shop. Unser Sortiment: Notebooks, Monitore, Zubehör." 0
   mkpkg 1.2 "TechTrade Shop" "Willkommen im TechTrade Shop. Neu: Wunschliste und schnellere Produktsuche." 1
   dpkg -i /opt/lab/release/techtrade-shop_1.0_all.deb
   nginx -t

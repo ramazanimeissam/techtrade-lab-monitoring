@@ -1,72 +1,138 @@
-PLAN-200 Lektion 13 - Cheatsheet Prometheus / Grafana / Kennzahlen
+PLAN-200 Lektion 13 - Cheatsheet Prometheus / Grafana / Zabbix
 =====================================================================
 
 SYSTEME
-  R1 (VyOS)  eth1 10.10.100.1 (Mgmt)  eth2 10.10.20.1 (Server)  eth0 DHCP (Internet)
+  R1 (VyOS)  eth1 10.10.100.1 (Mgmt, srv-mon)  eth2 10.10.20.1 (Server, srv-web)
+             eth0 DHCP (Internet)
              SNMPv3: Benutzer zbxmon, SHA / TechTrade-Auth1, AES / TechTrade-Priv1
   SRV-MON    10.10.100.20
              Prometheus  Firefox -> http://localhost:9090
              Grafana     Firefox -> http://localhost:3000   (admin / Gns3456)
              Zabbix      Firefox -> http://localhost:8080   (Admin / zabbix)
   SRV-WEB    10.10.20.13  Shop (nginx 80/443), node_exporter :9100, iperf3-Server
+             Release-Pakete: /opt/lab/release/
 
-DATEIEN UND HILFSBEFEHLE (auf SRV-MON, ohne sudo)
-  ~/monitoring/prometheus.yml   Was Prometheus abfragt (Ziele, Intervalle)
-  ~/monitoring/snmp-auth.yml    SNMP-Zugangsdaten fuer den snmp_exporter
-  ~/monitoring/blackbox.yml     Pruefungen fuer den Shop (nur lesen)
-  prom-check                    prometheus.yml auf Fehler pruefen
-  prom-reload                   prometheus.yml neu laden
-  snmp-reload                   snmp-auth.yml neu laden
+KONFIGURATION (auf SRV-MON)
+  /etc/prometheus/prometheus.yml   Was Prometheus abfragt (Jobs, Ziele, Intervalle)
+  /etc/prometheus/snmp-auth.yml    SNMP-Zugangsdaten für den snmp_exporter
+  /etc/prometheus/blackbox.yml     Prüfungen für den Shop (nur lesen)
 
-  Cheatsheet im Editor oeffnen (zum Kopieren):  mousepad ~/lab-cheatsheet.txt &
-  YAML: nur Leerzeichen, keine Tabs. Einrueckung genau wie unten.
+  Bearbeiten:   sudo nano /etc/prometheus/prometheus.yml
+
+  Prometheus und snmp_exporter lesen ihre Konfiguration nur beim Start.
+  Nach jeder Änderung: zuerst prüfen (wie nginx -t), dann neu laden
+  (= Konfiguration neu einlesen, ohne Neustart).
+
+  prometheus.yml prüfen:
+    sudo docker exec prometheus promtool check config /config/prometheus.yml
+  Prometheus neu laden:
+    curl -X POST http://localhost:9090/-/reload
+  snmp_exporter neu laden (nach Änderung an snmp-auth.yml):
+    curl -X POST http://localhost:9116/-/reload
+  Keine Ausgabe beim Neuladen = OK. Bei einem Fehler steht der Grund da.
+
+  Cheatsheet im Editor öffnen (zum Kopieren):  mousepad ~/lab-cheatsheet.txt &
+
+  YAML-Regeln: nur Leerzeichen, keine Tabs. Die Einrückung bestimmt, wozu
+  eine Zeile gehört. Blöcke unten genau so übernehmen, wie sie zwischen
+  den Markierungen ">>> Anfang" und "<<< Ende" stehen (Markierungen nicht
+  mitkopieren).
+
+  So sieht prometheus.yml im Ausgangszustand aus:
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  Neue Jobs kommen UNTER scrape_configs, als weiterer Eintrag in der
+  Liste: "- job_name" gleich eingerückt wie beim Job prometheus
+  (2 Leerzeichen), die Zeilen darunter 4 bzw. 6 Leerzeichen.
+
+ABFRAGEN LESEN
+  Zu jeder Abfrage stehen drei Zeilen:
+    Fragt:     was die Abfrage in Worten wissen will
+    Ergebnis:  Einheit, Wertebereich, was ohne Last normal ist
+    Nutzen:    wofür man den Wert braucht
+  Ziel ist, die Ausgabe zu verstehen - nicht PromQL auswendig zu können.
 
 ----------------------------------------------------------------------
-AUFTRAG 1 - Kennzahlenkatalog
-----------------------------------------------------------------------
-  Keine Befehle. Begriffe:
-    Aktive Messung   = Monitoring stellt selbst eine Anfrage (Probe, Ping)
-    Passive Messung  = Monitoring liest Zaehler/Werte des Systems (SNMP, Agent)
-    Warnung          = handeln, bevor es weh tut
-    Kritisch         = Vorgabe (z. B. OLA) verletzt oder unmittelbar gefaehrdet
-
-----------------------------------------------------------------------
-AUFTRAG 2 - Prometheus in Betrieb nehmen, SRV-WEB aufnehmen
+AUFTRAG 1 - Prometheus in Betrieb nehmen, SRV-WEB aufnehmen
 ----------------------------------------------------------------------
   Ziele ansehen:   Prometheus -> Status -> Target health
-  Abfragen:        Prometheus -> Query  (Abfrage eingeben, Execute,
+  Abfragen:        Prometheus -> Query (Abfrage eingeben, Execute,
                    Tab "Table" oder "Graph")
 
   Exporter auf SRV-WEB direkt ansehen (auf SRV-MON):
     curl -s http://10.10.20.13:9100/metrics | grep node_load
 
-  Job ergaenzen (auf SRV-MON):
-    nano ~/monitoring/prometheus.yml
-  Ganz unten anfuegen:
+  Job ergänzen (auf SRV-MON):
+    sudo nano /etc/prometheus/prometheus.yml
+  Unter scrape_configs als weiteren Job hinzufügen, gleich eingerückt
+  wie der Job prometheus:
 
+>>> Anfang
   - job_name: node
     static_configs:
       - targets: ['10.10.20.13:9100']
+<<< Ende
 
-    prom-check
-    prom-reload
+  Prüfen und neu laden:
+    sudo docker exec prometheus promtool check config /config/prometheus.yml
+    curl -X POST http://localhost:9090/-/reload
+  Dann: Status -> Target health -> Job node muss UP sein.
 
   Abfragen:
     up
+      Fragt:     Ist jedes Ziel erreichbar?
+      Ergebnis:  1 = erreichbar, 0 = nicht erreichbar, eine Zeile pro Ziel.
+      Nutzen:    Erste Kontrolle nach jedem neuen Job.
+
     100 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100
+      Fragt:     Wie viel Prozent der Zeit war die CPU in der letzten
+                 Minute beschäftigt?
+      Ergebnis:  eine Zahl pro Server, 0-100 %, ohne Last unter 5 %.
+      Nutzen:    Schwellenwert im Dashboard, z. B. Warnung ab 80 %.
+
     100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+      Fragt:     Wie viel Prozent des Arbeitsspeichers sind belegt?
+      Ergebnis:  0-100 %, auf SRV-WEB ohne Last meist 20-40 %.
+      Nutzen:    Erkennen, ob ein Server mehr RAM braucht.
+
     100 * (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})
+      Fragt:     Wie voll ist die Disk "/" in Prozent?
+      Ergebnis:  0-100 %, ändert sich nur langsam.
+      Nutzen:    Rechtzeitig warnen, bevor die Disk voll ist.
 
   Aufbewahrungsdauer:  Status -> Runtime & build information
                        -> Zeile "Storage retention"
 
+  Grafana mit Prometheus verbinden (ab Auftrag 2 arbeiten Sie in Grafana):
+    Firefox -> http://localhost:3000   admin / Gns3456
+    Connections -> Data sources -> Add data source -> Prometheus
+    Prometheus server URL: http://localhost:9090
+    -> ganz unten Save & test
+
 ----------------------------------------------------------------------
-AUFTRAG 3 - Netz messen: R1 ueber SNMPv3
+AB AUFTRAG 2: ABFRAGEN IN GRAFANA
+----------------------------------------------------------------------
+  Grafana -> Explore -> Datenquelle prometheus
+  Im Abfragefeld von "Builder" auf "Code" umschalten, Abfrage einfügen,
+  "Run query" (oder Shift + Enter).
+  Hilfen:  Builder + "Explain" erklärt eine Abfrage Schritt für Schritt
+           Drilldown -> Metrics: alle Metriken durchstöbern
+           "Add" -> "Add to dashboard": Abfrage direkt als Panel übernehmen
+  Zeitraum oben rechts wählen oder im Graph mit der Maus markieren.
+  Neue Jobs prüfen Sie weiterhin in Prometheus -> Status -> Target health.
+
+----------------------------------------------------------------------
+AUFTRAG 2 - Netz messen: R1 über SNMPv3
 ----------------------------------------------------------------------
   Zugangsdaten eintragen (auf SRV-MON):
-    nano ~/monitoring/snmp-auth.yml
-  Zeile "auths: {}" ersetzen durch:
+    sudo nano /etc/prometheus/snmp-auth.yml
+  Die Zeile "auths: {}" ersetzen durch:
 
+>>> Anfang
 auths:
   techtrade_v3:
     version: 3
@@ -76,14 +142,16 @@ auths:
     password: TechTrade-Auth1
     priv_protocol: AES
     priv_password: TechTrade-Priv1
+<<< Ende
 
-    snmp-reload
+  snmp_exporter neu laden:
+    curl -X POST http://localhost:9116/-/reload
 
-  snmp_exporter von Hand testen (auf SRV-MON):
-    curl -s "http://localhost:9116/snmp?target=10.10.100.1&module=if_mib&auth=techtrade_v3" | grep ifHCInOctets
+  Job ergänzen:  sudo nano /etc/prometheus/prometheus.yml
+  Unter scrape_configs als weiteren Job hinzufügen, gleich eingerückt
+  wie der Job prometheus:
 
-  Job ergaenzen:  nano ~/monitoring/prometheus.yml  -> ganz unten anfuegen:
-
+>>> Anfang
   - job_name: snmp
     metrics_path: /snmp
     params:
@@ -98,34 +166,68 @@ auths:
         target_label: instance
       - target_label: __address__
         replacement: localhost:9116
+<<< Ende
 
-    prom-check
-    prom-reload
+  Prüfen und neu laden:
+    sudo docker exec prometheus promtool check config /config/prometheus.yml
+    curl -X POST http://localhost:9090/-/reload
+  Dann: Prometheus -> Status -> Target health -> Job snmp muss UP sein.
+  Bei DOWN steht in der Spalte "Error" der Grund.
 
-  Abfragen:
-    ifHCInOctets{job="snmp"}                                  Zaehler (steigt nur)
-    rate(ifHCInOctets{job="snmp"}[1m]) * 8                    bit/s eingehend
-    rate(ifHCOutOctets{job="snmp", ifName="eth2"}[1m]) * 8    bit/s ins Server-Segment
+  Abfragen (Grafana -> Explore):
+    ifHCInOctets{job="snmp"}
+      Fragt:     Wie viele Bytes sind seit dem Start von R1 auf jedem
+                 Interface eingegangen?
+      Ergebnis:  ein Zähler pro Interface, steigt nur (Counter).
+      Nutzen:    Rohdaten - für sich allein wenig aussagekräftig,
+                 Grundlage für rate() und increase().
+
+    rate(ifHCInOctets{job="snmp"}[1m]) * 8
+      Fragt:     Wie viele Bit pro Sekunde kommen auf jedem Interface an
+                 (Durchschnitt der letzten Minute)?
+      Ergebnis:  bit/s pro Interface, ohne Last wenige kbit/s.
+      Nutzen:    aktuelle Datenrate pro Interface.
+
+    rate(ifHCOutOctets{job="snmp", ifName="eth2"}[1m]) * 8
+      Fragt:     Wie viele Bit pro Sekunde schickt R1 ins Server-Segment?
+      Ergebnis:  bit/s, ohne Last wenige kbit/s, beim Lasttest ca. 52 Mbit/s.
+      Nutzen:    Verkehr zu den Servern.
+
     rate(ifHCOutOctets{job="snmp", ifName="eth2"}[1m]) * 8 / 100e6 * 100
-                                                              Auslastung % bei 100 Mbit/s
-    rate(ifInErrors{job="snmp"}[5m])                          Fehler pro Sekunde
-    ifHighSpeed{job="snmp"}                                   gemeldete Geschwindigkeit (Mbit/s)
+      Fragt:     Wie stark ist die Leitung ins Server-Segment ausgelastet,
+                 gemessen an der geplanten Kapazität von 100 Mbit/s?
+      Ergebnis:  0-100 %, ohne Last unter 1 %.
+      Nutzen:    Kapazitätsplanung, Schwellenwert im Dashboard.
 
-  Lasttest (auf SRV-MON), 50 Mbit/s waehrend 60 Sekunden:
+    rate(ifInErrors{job="snmp"}[5m])
+      Fragt:     Wie viele fehlerhafte Pakete pro Sekunde kommen an?
+      Ergebnis:  pro Interface, normal 0.
+      Nutzen:    Hinweis auf defekte Kabel oder Duplex-Probleme.
+
+    ifHighSpeed{job="snmp"}
+      Fragt:     Welche Geschwindigkeit meldet jedes Interface?
+      Ergebnis:  Mbit/s (Port-Geschwindigkeit, nicht die verfügbare
+                 Kapazität).
+      Nutzen:    Kontrolle der Port-Einstellung.
+
+  Lasttest (auf SRV-MON), 50 Mbit/s während 60 Sekunden:
     iperf3 -c 10.10.20.13 -b 50M -t 60
 
-  Zaehler auf R1 vor und nach dem Lasttest ablesen:
+  Zähler auf R1 vor und nach dem Lasttest ablesen:
     show interfaces ethernet eth2
   (Zeile TX: bytes)  ->  Mbit/s = (bytes_nachher - bytes_vorher) * 8 / Sekunden / 1000000
 
 ----------------------------------------------------------------------
-AUFTRAG 4 - Shop messen: Verfuegbarkeit, Antwortzeit, Zertifikat
+AUFTRAG 3 - Shop messen: Verfügbarkeit, Antwortzeit, Zertifikat
 ----------------------------------------------------------------------
   blackbox_exporter von Hand testen (auf SRV-MON):
     curl -s "http://localhost:9115/probe?module=shop_http&target=http://10.10.20.13/" | grep -E "probe_success|probe_duration"
 
-  Jobs ergaenzen:  nano ~/monitoring/prometheus.yml  -> ganz unten anfuegen:
+  Jobs ergänzen:  sudo nano /etc/prometheus/prometheus.yml
+  Unter scrape_configs als zwei weitere Jobs hinzufügen, gleich
+  eingerückt wie der Job prometheus:
 
+>>> Anfang
   - job_name: shop
     scrape_interval: 5s
     metrics_path: /probe
@@ -154,17 +256,40 @@ AUFTRAG 4 - Shop messen: Verfuegbarkeit, Antwortzeit, Zertifikat
         target_label: instance
       - target_label: __address__
         replacement: localhost:9115
+<<< Ende
 
-    prom-check
-    prom-reload
+  Prüfen und neu laden:
+    sudo docker exec prometheus promtool check config /config/prometheus.yml
+    curl -X POST http://localhost:9090/-/reload
+  Dann: Prometheus -> Status -> Target health -> shop und shop_tls UP.
 
-  Abfragen:
-    probe_success{job="shop"}                                  1 = ok, 0 = Fehler
-    avg_over_time(probe_success{job="shop"}[1h]) * 100         Verfuegbarkeit % letzte Stunde
-    probe_duration_seconds{job="shop"}                         Antwortzeit in Sekunden
+  Abfragen (Grafana -> Explore):
+    probe_success{job="shop"}
+      Fragt:     War die letzte Prüfung des Shops erfolgreich
+                 (HTTP 200 und Text "TechTrade Shop")?
+      Ergebnis:  1 = ok, 0 = Fehler, alle 5 Sekunden ein Wert.
+      Nutzen:    Grundlage für die Verfügbarkeit.
+
+    avg_over_time(probe_success{job="shop"}[1h]) * 100
+      Fragt:     Wie viel Prozent der Prüfungen in der letzten Stunde
+                 waren erfolgreich?
+      Ergebnis:  0-100 %, im Normalbetrieb 100 %.
+      Nutzen:    Verfügbarkeit gemäss OLA (Ziel 99.5 %).
+
+    probe_duration_seconds{job="shop"}
+      Fragt:     Wie lange hat die letzte Prüfung gedauert?
+      Ergebnis:  Sekunden, im Lab wenige Millisekunden (0.00x).
+      Nutzen:    Antwortzeit aus Kundensicht.
+
     probe_http_status_code{job="shop"}
+      Fragt:     Welchen HTTP-Status hat der Shop geliefert?
+      Ergebnis:  normal 200, bei Fehlern z. B. 503.
+      Nutzen:    Fehlerart erkennen.
+
     (probe_ssl_earliest_cert_expiry{job="shop_tls"} - time()) / 86400
-                                                               Zertifikat: Resttage
+      Fragt:     In wie vielen Tagen läuft das Zertifikat des Shops ab?
+      Ergebnis:  Tage (Kommazahl).
+      Nutzen:    Rechtzeitig erneuern, bevor Kunden eine Warnung sehen.
 
   Gegenprobe Antwortzeit (auf SRV-MON):
     curl -o /dev/null -s -w '%{http_code} %{time_total}\n' http://10.10.20.13/
@@ -173,113 +298,157 @@ AUFTRAG 4 - Shop messen: Verfuegbarkeit, Antwortzeit, Zertifikat
     date
 
 ----------------------------------------------------------------------
-AUFTRAG 5 - Dashboard in Grafana
+AUFTRAG 4 - Dashboard in Grafana
 ----------------------------------------------------------------------
-  Anmelden:        Firefox -> http://localhost:3000   admin / Gns3456
-  Datenquelle:     Connections -> Data sources -> Add new data source
-                   -> Prometheus
-                   Prometheus server URL: http://localhost:9090
-                   -> ganz unten Save & test
   Dashboard:       Dashboards -> New -> New dashboard -> Add visualization
-                   -> Datenquelle prometheus waehlen
+                   -> Datenquelle prometheus wählen
   Abfrage:         Im Abfragefeld von "Builder" auf "Code" umschalten,
-                   PromQL einfuegen, "Run queries"
-  Typ:             rechts oben Visualisierung waehlen (Time series, Stat, Gauge)
+                   PromQL einfügen, "Run queries"
+                   ($__range lässt sich nur im Code-Modus eintragen)
+  Typ:             rechts oben Visualisierung wählen (Time series, Stat, Gauge)
   Rechte Spalte:   Title
-                   Standard options -> Unit
-                   Standard options -> Min / Max
+                   Standard options -> Unit, Min / Max, Decimals
+                   (Unit am schnellsten über die Suche oben rechts: "unit")
                    Thresholds -> Base + Werte, Farben
-                   (Time series zusaetzlich: Show thresholds -> As lines)
+                   (Time series zusätzlich: Show thresholds -> As lines)
+  Zurück:          "Back to dashboard"
   Speichern:       oben rechts Save dashboard
+  Neues Panel:     Edit -> Add -> Visualization
 
-  Abfragen fuer die Panels:
-    Shop Verfuegbarkeit (Stat, Unit Percent 0-100, Zeitraum oben rechts = Messperiode):
+  Drei Panels von Hand:
+    Shop Verfügbarkeit (Stat, Unit Percent (0-100), Decimals 2):
       avg_over_time(probe_success{job="shop"}[$__range]) * 100
-    Shop Antwortzeit (Time series, Unit seconds):
-      probe_duration_seconds{job="shop"}
-    Zertifikat Resttage (Stat, Unit days):
-      (probe_ssl_earliest_cert_expiry{job="shop_tls"} - time()) / 86400
-    Auslastung Server-Segment (Time series, Unit Percent 0-100, Max 100):
+      Fragt:     Wie viel Prozent der Prüfungen im gewählten Zeitraum
+                 (oben rechts) waren erfolgreich?
+      Ergebnis:  eine Zahl, 0-100 %, folgt dem Zeitraum des Dashboards.
+      Nutzen:    Verfügbarkeit für die OLA-Messperiode.
+
+    Auslastung Server-Segment (Time series, Unit Percent (0-100), Max 100):
       rate(ifHCOutOctets{job="snmp", ifName="eth2"}[1m]) * 8 / 100e6 * 100
-    Interface-Fehler R1 (Time series):
-      rate(ifInErrors{job="snmp"}[5m]) + rate(ifOutErrors{job="snmp"}[5m])
-    SRV-WEB CPU % (Time series, Unit Percent 0-100):
-      100 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100
-    SRV-WEB Disk / belegt % (Gauge, Unit Percent 0-100):
-      100 * (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})
+      Fragt / Ergebnis / Nutzen: siehe Auftrag 2.
+
+    Zertifikat Restlaufzeit (Stat, Unit days):
+      (probe_ssl_earliest_cert_expiry{job="shop_tls"} - time()) / 86400
+      Fragt / Ergebnis / Nutzen: siehe Auftrag 3.
+
+  Community-Dashboard importieren:
+    1. Im Browser die Dashboard-Webseite von Grafana öffnen:
+       https://grafana.com/grafana/dashboards
+    2. Nach "Node Exporter Full" suchen, Dashboard öffnen,
+       ID kopieren ("Copy ID to clipboard").
+    3. Grafana -> Dashboards -> New -> Import -> ID einfügen -> Load
+       -> Datenquelle prometheus wählen -> Import
+    4. Oben im Dashboard Job node und Host 10.10.20.13:9100 wählen.
+
+  Optional: KI-Dashboard für die übrigen Panels
+    Eine KI ein Grafana-Dashboard als JSON erzeugen lassen
+    (Datenquelle prometheus, Panels: SRV-WEB CPU, SRV-WEB Disk,
+    Interface-Fehler R1). Import: Dashboards -> New -> Import ->
+    JSON einfügen -> Load -> Import. Danach Werte plausibilisieren.
+    Kontrollabfragen zum Vergleich:
+      SRV-WEB CPU %:
+        100 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100
+      SRV-WEB Disk / belegt %:
+        100 * (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})
+      Interface-Fehler R1:
+        rate(ifInErrors{job="snmp"}[5m]) + rate(ifOutErrors{job="snmp"}[5m])
 
   Legende statt langer Labels:  Options -> Legend -> Custom -> {{ifName}}
 
-  Dashboard als Datei:  Export -> Export as JSON  (oben rechts)
+  Hinweis zu importierten Dashboards: Zeigt ein Panel "N/A", unter
+  Value options -> Fields prüfen (z. B. "Numeric fields" wählen).
 
 ----------------------------------------------------------------------
-AUFTRAG 6 - Release 1.2 einspielen und ueberwachen
+AUFTRAG 5 - Release 1.2 einspielen und überwachen
 ----------------------------------------------------------------------
-  Zeitraum im Dashboard oben rechts: Last 15 minutes, Refresh 5s
+  Dashboard aktualisiert sich nicht von selbst:
+    oben rechts Pfeil neben "Refresh" -> 5s
+  Zeitraum oben rechts: Last 15 minutes
 
-  Annotation setzen:  im Time-series-Panel Strg + Klick auf den Zeitpunkt
+  Panel für kurze Fenster (Time series, Unit Percent (0-100)):
+    avg_over_time(probe_success{job="shop"}[5m]) * 100
+      Fragt:     Wie viel Prozent der Prüfungen in den jeweils letzten
+                 5 Minuten waren erfolgreich (gleitender Durchschnitt)?
+      Ergebnis:  eine Linie 0-100 %, unabhängig vom Zeitraum oben rechts.
+      Nutzen:    zeigt einen Einbruch sofort - über 24 Stunden gemittelt
+                 wäre er kaum sichtbar.
+
+  Annotation setzen:  nur in einem Time-series-Panel möglich:
+                      Strg + Klick auf den Zeitpunkt im Graph
                       -> Text eingeben -> Save
 
-  Panel fuer kurze Fenster (Time series, Unit Percent 0-100):
-    avg_over_time(probe_success{job="shop"}[5m]) * 100
-
-  Release einspielen (auf SRV-WEB):
+  Release einspielen (auf SRV-WEB, nicht auf SRV-MON):
     ls /opt/lab/release/
     sudo dpkg -i /opt/lab/release/techtrade-shop_1.2_all.deb
     dpkg -l techtrade-shop | tail -1
 
-  Einzeltest von Hand (auf SRV-MON), mehrmals ausfuehren:
+  Einzeltest von Hand (auf SRV-MON), mehrmals ausführen:
     curl -s -o /dev/null -w '%{http_code}\n' http://10.10.20.13/
 
   Rollback (auf SRV-WEB):
     sudo dpkg -i /opt/lab/release/techtrade-shop_1.0_all.deb
     dpkg -l techtrade-shop | tail -1
 
-  Ursache ansehen (auf SRV-WEB):
-    dpkg -L techtrade-shop
-    cat /etc/nginx/conf.d/techtrade-shop.conf
-    sudo tail /var/log/nginx/access.log
+----------------------------------------------------------------------
+AUFTRAG 6 - Zabbix und Prometheus im Vergleich
+----------------------------------------------------------------------
+  R1 und SRV-WEB sind in Zabbix bereits erfasst (Templates
+  "Linux by SNMP" und "Linux by Zabbix agent", Web-Szenario Shop).
 
-----------------------------------------------------------------------
-AUFTRAG 7 - Zabbix und Prometheus im Vergleich
-----------------------------------------------------------------------
-  Lasttest (auf SRV-MON):
+  Lasttest (auf SRV-MON), 50 Mbit/s während 3 Minuten:
     iperf3 -c 10.10.20.13 -b 50M -t 180
 
-  Frage: Gesamtverkehr ueber alle Interfaces von R1 waehrend des Tests
+  Frage 1: Datenvolumen ins Server-Segment (R1 eth2 ausgehend)
+    Prometheus (Grafana -> Explore, Zeitraum genau auf den Test ziehen):
+      increase(ifHCOutOctets{job="snmp", ifName="eth2"}[$__range])
+        Fragt:     Wie viele Bytes hat R1 im gewählten Zeitraum über eth2
+                   ins Server-Segment geschickt?
+        Ergebnis:  eine Zahl in Bytes (Unit bytes(SI)).
+        Nutzen:    Datenvolumen für Kapazitätsplanung oder Abrechnung.
+      Achtung: iperf3 zeigt GBytes binär (GiB), Grafana dezimal (GB).
+    Zabbix:
+      Monitoring -> Latest data, Hosts = R1, Name = "eth2: Bits sent"
+      -> Graph, Zeitraum = Test -> Wert "avg" ablesen
+      Volumen in Byte ~ avg (bit/s) * Testdauer (s) / 8
+      Achtung: Interface-Items werden nur alle 3 Minuten abgefragt.
 
-  Prometheus -> Query -> Graph, Zeitraum so waehlen, dass der Test drin ist:
-    sum(rate(ifHCInOctets{job="snmp"}[1m])) * 8
+  Eigenes Zabbix-Item für den Byte-Zähler (danach Lasttest wiederholen):
+    1. OID nachschlagen: Data collection -> Hosts -> Zeile R1 -> Items,
+       Name "eth2: Bits sent" öffnen -> Feld "SNMP OID" notieren
+       (beginnt mit 1.3.6.1.2.1.31.1.1.1.10.)
+    2. Data collection -> Hosts -> Zeile R1 -> Items -> Create item
+         Name:                 Interface eth2: Bytes sent (Zähler)
+         Type:                 SNMP agent
+         Key:                  r1.eth2.out.bytes
+         Host interface:       10.10.100.1:161
+         SNMP OID:             (OID aus Schritt 1)
+         Type of information:  Numeric (unsigned)
+         Units:                B
+         Update interval:      30s
+         Preprocessing:        keines
+       -> Add
+    3. Lasttest wiederholen.
+    4. Monitoring -> Latest data -> Item -> History:
+       Wert am Ende minus Wert am Anfang = Datenvolumen
 
-  Zabbix:
-    Einzelwerte:   Monitoring -> Latest data, Hosts = R1,
-                   Name = "Bits received" -> Apply -> Graph
-    Summe als eigenes Item:
-                   Data collection -> Hosts -> Zeile R1 -> Items -> Create item
-                   Name:                R1 Verkehr eingehend total
-                   Type:                Calculated
-                   Key:                 r1.traffic.in.total
-                   Formula:             sum(last_foreach(/R1/net.if.in[*]))
-                   Type of information: Numeric (float)
-                   Units:               bps
-                   Update interval:     1m
-                   -> Add, danach Monitoring -> Latest data -> Graph
+  Frage 2: Software-Version von R1
+    Zabbix:      Monitoring -> Latest data, Hosts = R1,
+                 Name = "System description"
+    Prometheus:  Grafana -> Explore -> Metrics browser -> nach "sys" suchen
+                 (Der snmp_exporter holt nur, was das Modul im Job
+                 vorsieht. Im Job snmp steht module: [if_mib].)
 
-  Frage: Welche Software-Version laeuft auf R1?
-  Zabbix:      Monitoring -> Latest data, Hosts = R1, Name = "description"
-  Prometheus:  Query -> {job="snmp", __name__=~"sys.*"}
-               (Weitere SNMP-Werte holt der snmp_exporter nur, wenn das
-                passende Modul im Job steht, z. B. module: [if_mib, system])
+  Frage 3: Verfügbarkeit neu definiert ("verfügbar = Antwort ok UND
+           schneller als 100 ms"), Wert für die letzten 30 Minuten
+    Prometheus:
+      avg_over_time((probe_success{job="shop"} * (probe_duration_seconds{job="shop"} < bool 0.1))[30m:5s]) * 100
+        Fragt:     Wie viel Prozent der Prüfungen in den letzten 30 Minuten
+                   waren erfolgreich UND schneller als 100 ms?
+        Ergebnis:  0-100 %.
+        Nutzen:    Eine neue Definition rückwirkend auswerten.
+    Zabbix:
+      Monitoring -> Hosts -> Zeile SRV-WEB -> Web -> Shop
+      (Graphen "Response time" und Fehlerstatus ansehen)
 
-  Frage: Verfuegbarkeit neu definiert ("verfuegbar = Antwort ok UND
-         schneller als 100 ms"), Wert fuer die letzte Stunde
-  Prometheus:
-    avg_over_time((probe_success{job="shop"} * (probe_duration_seconds{job="shop"} < bool 0.1))[1h:5s]) * 100
-  Zabbix:
-    Data collection -> Hosts -> Zeile SRV-WEB -> Web -> Shop -> Steps
-    -> Startseite -> Timeout
-    Monitoring -> Hosts -> Zeile SRV-WEB -> Web -> Shop  (Verlauf ansehen)
-
-  Was Zabbix ohne Zusatzaufwand bereits liefert:
-    Monitoring -> Problems
-    Monitoring -> Hosts -> Zeile R1 -> Dashboards
+  Zabbix: Abfrage-Intervall eines Interface-Items ansehen:
+    Data collection -> Hosts -> Zeile R1 -> Items -> Spalte "Interval"
