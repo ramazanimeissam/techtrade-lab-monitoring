@@ -30,16 +30,15 @@ echo "--- Alertmanager und Mailpit"
 chk "Alertmanager bereit (:9093)"                 curl -fs http://localhost:9093/-/ready
 chk "alertmanager.yml gültig (amtool)"            sudo docker exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
 chk "Mailpit Web (:8025)"                         curl -fs http://localhost:8025/api/v1/info
-curl -s -X DELETE http://localhost:8025/api/v1/messages >/dev/null
-curl -s -H 'Content-Type: application/json' -d '[{"labels":{"alertname":"KitTest","severity":"info"},"annotations":{"summary":"Test der Alarmkette"}}]' http://localhost:9093/api/v2/alerts >/dev/null
-echo "       (Testalarm gesendet, warte 45 s auf die Mail ...)"
-sleep 45
+if grep -q email_configs /etc/alertmanager/alertmanager.yml; then
+  bad "alertmanager.yml hat schon einen Mail-Empfänger (sollen Studierende einrichten)"; else ok "Alertmanager noch ohne Mail-Empfänger (Startzustand)"; fi
 N=$(curl -s http://localhost:8025/api/v1/messages | jq '.total // 0')
-[ "${N:-0}" -ge 1 ] && ok "Alarmkette Alertmanager -> Mailpit: Mail angekommen" || bad "Keine Mail in Mailpit"
-curl -s -X DELETE http://localhost:8025/api/v1/messages >/dev/null
+[ "${N:-0}" = 0 ] && ok "Mailpit-Posteingang leer" || bad "Mailpit enthält schon $N Mails"
 
 echo "--- Logs"
 chk "syslog-ng läuft"                             systemctl is-active syslog-ng
+OUT=$(sudo syslog-ng --syntax-only 2>&1)
+[ -z "$OUT" ] && ok "syslog-ng --syntax-only ohne Ausgabe" || bad "syslog-ng --syntax-only meldet: $(echo "$OUT" | head -1)"
 if systemctl is-active rsyslog >/dev/null 2>&1; then bad "rsyslog läuft noch auf SRV-MON"; else ok "rsyslog auf SRV-MON entfernt"; fi
 if sudo ss -lnup | grep -q ':514 ' || sudo ss -lntp | grep -q ':514 '; then
   bad "Port 514 ist schon offen (Empfang soll fehlen)"; else ok "Port 514 noch zu (Startzustand)"; fi
@@ -72,5 +71,7 @@ echo "Ergebnis: $OK OK, $FAIL Fehler"
 echo "Zusätzlich von Hand prüfen:"
 echo "  SRV-WEB:  sudo tc qdisc add dev lo root netem delay 10ms && sudo tc qdisc del dev lo root   (keine Fehlermeldung)"
 echo "  SRV-WEB:  systemctl is-active rsyslog                 (active)"
+echo "  SRV-WEB:  grep RepeatedMsgReduction /etc/rsyslog.conf  (off)"
+echo "  SRV-WEB:  ls /etc/nginx/conf.d/ ; grep syslog /etc/nginx/sites-available/default   (kein Logfilter, kein syslog-Ziel)"
 echo "  R1:       show configuration commands | match syslog  (kein remote-Ziel)"
 exit $FAIL

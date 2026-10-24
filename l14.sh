@@ -29,7 +29,17 @@ if [[ $ROLE == mon ]]; then
 
   log "syslog-ng installieren (ersetzt rsyslog auf SRV-MON, noch kein Empfang)"
   $APT install syslog-ng-core netcat-openbsd
-  systemctl enable --now syslog-ng
+  # Warnungen der Ubuntu-Grundkonfiguration beseitigen, damit
+  # "syslog-ng --syntax-only" ohne Ausgabe bleibt
+  sed -i -E 's/^@version: *[0-9.]+/@version: 4.3/' /etc/syslog-ng/syslog-ng.conf
+  sed -i 's/stats_freq(0)/stats(freq(0))/' /etc/syslog-ng/syslog-ng.conf
+  FSM=/usr/share/syslog-ng/smart-multi-line.fsm
+  if [[ ! -s $FSM ]]; then
+    wget -q https://raw.githubusercontent.com/syslog-ng/syslog-ng/syslog-ng-4.3.1/lib/multi-line/smart-multi-line.fsm -O $FSM \
+      || { rm -f $FSM; echo "HINWEIS: smart-multi-line.fsm nicht geladen (syslog-ng warnt beim Prüfen)"; }
+  fi
+  systemctl enable syslog-ng
+  systemctl restart syslog-ng
 
   log "Prometheus: L13-Endzustand plus Anbindung Alertmanager"
   cat > /etc/prometheus/prometheus.yml <<'EOF'
@@ -116,7 +126,7 @@ auths:
     priv_password: TechTrade-Priv1
 EOF
 
-  log "Alertmanager: Mail an Mailpit"
+  log "Alertmanager: läuft, noch ohne Empfänger (Studierende richten die Mail ein)"
   mkdir -p /etc/alertmanager
   cat > /etc/alertmanager/alertmanager.yml <<'EOF'
 # Alertmanager-Konfiguration TechTrade AG (SRV-MON)
@@ -124,23 +134,12 @@ EOF
 # Prüfen:       sudo docker exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
 # Neu laden:    curl -X POST http://localhost:9093/-/reload
 
-global:
-  smtp_smarthost: 'localhost:1025'
-  smtp_from: 'alertmanager@techtrade.lab'
-  smtp_require_tls: false
-
+# Noch kein Empfänger eingerichtet: Alarme werden angenommen, aber nicht zugestellt.
 route:
-  receiver: betrieb
-  group_by: [alertname]
-  group_wait: 30s
-  group_interval: 1m
-  repeat_interval: 1h
+  receiver: leer
 
 receivers:
-  - name: betrieb
-    email_configs:
-      - to: 'betrieb@techtrade.lab'
-        send_resolved: true
+  - name: leer
 EOF
 
   log "Loki: Logspeicher mit Regelauswertung"
@@ -357,6 +356,7 @@ EOF
   log "Konfiguration neu einlesen"
   curl -fs -X POST http://localhost:9116/-/reload || true
   curl -fs -X POST http://localhost:9090/-/reload || true
+  curl -fs -X POST http://localhost:9093/-/reload || true
 
   log "Grafana: Datenquelle prometheus (Endzustand L13)"
   if ! curl -fs -u admin:Gns3456 http://localhost:3000/api/datasources/name/prometheus >/dev/null; then
@@ -391,6 +391,14 @@ if [[ $ROLE == web ]]; then
     modprobe sch_netem
   fi
   echo sch_netem > /etc/modules-load.d/netem.conf
+
+  log "rsyslog: gleiche Meldungen nicht zusammenfassen (Logalarme zählen jede Zeile)"
+  if grep -q '^\$RepeatedMsgReduction' /etc/rsyslog.conf; then
+    sed -i 's/^\$RepeatedMsgReduction.*/$RepeatedMsgReduction off/' /etc/rsyslog.conf
+  else
+    echo '$RepeatedMsgReduction off' >> /etc/rsyslog.conf
+  fi
+  rsyslogd -N1 >/dev/null 2>&1 && systemctl restart rsyslog
 
   log "Cheatsheet"
   if wget -q "$KIT_URL/l14-cheatsheet.txt" -O /home/$U/lab-cheatsheet.txt; then

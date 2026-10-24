@@ -20,10 +20,12 @@ KONFIGURATIONSDATEIEN
   SRV-MON  /etc/syslog-ng/conf.d/          eigene syslog-ng-Konfiguration (*.conf)
   SRV-MON  /etc/prometheus/prometheus.yml  Jobs, Anbindung Alertmanager, Regeldateien
   SRV-MON  /etc/prometheus/alerts.yml      Alarmregeln (legen Sie selbst an)
-  SRV-MON  /etc/alertmanager/alertmanager.yml   Wer bekommt welche Alarme
+  SRV-MON  /etc/alertmanager/alertmanager.yml   Wer bekommt welche Alarme (noch leer)
   SRV-MON  /etc/loki/rules/fake/           Alarmregeln auf Logs (*.yml)
   SRV-MON  /etc/alloy/config.alloy         Weiterleitung nach Loki (nur lesen)
   SRV-WEB  /etc/rsyslog.d/                 eigene rsyslog-Konfiguration (*.conf)
+  SRV-WEB  /etc/nginx/sites-available/default   Webserver des Shops
+  SRV-WEB  /etc/nginx/conf.d/              Zusatzkonfiguration nginx (*.conf)
 
   Cheatsheet im Editor öffnen (zum Kopieren):  mousepad ~/lab-cheatsheet.txt &
   Blöcke zwischen ">>> Anfang" und "<<< Ende" genau so übernehmen
@@ -32,16 +34,21 @@ KONFIGURATIONSDATEIEN
   Jeder Dienst liest seine Konfiguration nur beim Start. Nach jeder
   Änderung: zuerst prüfen (wie nginx -t), dann neu laden.
 
-----------------------------------------------------------------------
-ZENTRALEN SYSLOG-SERVER IN BETRIEB NEHMEN
-----------------------------------------------------------------------
-  Ausgangslage ansehen (SRV-MON):
-    gns3@SRV-MON:~$ systemctl status syslog-ng
-    gns3@SRV-MON:~$ sudo ss -tulpn | grep 514        (noch keine Ausgabe)
-    gns3@SRV-MON:~$ ls /etc/syslog-ng/conf.d/
+  Maus reagiert im Fenster nicht mehr (SRV-MON oder SRV-WEB):
+    sudo systemctl restart lightdm
 
-  Empfänger einrichten (SRV-MON):
-    gns3@SRV-MON:~$ sudo nano /etc/syslog-ng/conf.d/remote.conf
+----------------------------------------------------------------------
+1. ZENTRALEN SYSLOG-SERVER IN BETRIEB NEHMEN
+----------------------------------------------------------------------
+  Ausgangslage ansehen:
+    Auf SRV-MON:
+      systemctl status syslog-ng
+      sudo ss -tulpn | grep 514        # noch keine Ausgabe
+      ls /etc/syslog-ng/conf.d/
+
+  Empfänger einrichten:
+    Auf SRV-MON:
+      sudo nano /etc/syslog-ng/conf.d/remote.conf
 
 >>> Anfang
 # TechTrade AG - zentraler Syslog-Empfang auf SRV-MON
@@ -54,34 +61,40 @@ source s_remote {
 };
 
 # Filter: Anmelde-Meldungen (Facilities auth und authpriv)
-filter f_auth {
+filter f_remote_auth {
     facility(auth, authpriv);
 };
 
 # Ziel: eine Datei pro Absender, benannt nach dem Hostnamen
-destination d_pro_host {
+destination d_remote_host {
     file("/var/log/remote/${HOST}.log" create-dirs(yes));
 };
 
 # Ziel: alle Anmelde-Meldungen aller Absender in einer Datei
-destination d_auth {
+destination d_remote_auth {
     file("/var/log/remote/auth.log" create-dirs(yes));
 };
 
 # Verknüpfung: Quelle -> (Filter) -> Ziel
-log { source(s_remote); destination(d_pro_host); };
-log { source(s_remote); filter(f_auth); destination(d_auth); };
+log { source(s_remote); destination(d_remote_host); };
+log { source(s_remote); filter(f_remote_auth); destination(d_remote_auth); };
 <<< Ende
 
-  Prüfen und neu laden (SRV-MON):
-    gns3@SRV-MON:~$ sudo syslog-ng --syntax-only
-      (keine Ausgabe = OK)
-    gns3@SRV-MON:~$ sudo systemctl restart syslog-ng
-    gns3@SRV-MON:~$ sudo ss -tulpn | grep 514
-      (syslog-ng auf udp 514 und tcp 514)
+  Prüfen und neu laden:
+    Auf SRV-MON:
+      sudo syslog-ng --syntax-only
+      # keine Ausgabe = OK; ein Fehler beginnt mit "Error parsing config"
+      sudo systemctl restart syslog-ng
+      sudo ss -tulpn | grep 514
+      # syslog-ng auf udp 514 und tcp 514
+  Namen (s_..., f_..., d_...) müssen eindeutig sein. Die Grundkonfiguration
+  verwendet schon f_auth und d_auth. Vorhandene Namen anzeigen:
+    Auf SRV-MON:
+      grep -E "^(source|filter|destination)" /etc/syslog-ng/syslog-ng.conf
 
   SRV-WEB: rsyslog leitet alle Meldungen ab info per TCP weiter:
-    gns3@SRV-WEB:~$ sudo nano /etc/rsyslog.d/90-srv-mon.conf
+    Auf SRV-WEB:
+      sudo nano /etc/rsyslog.d/90-srv-mon.conf
 
 >>> Anfang
 # TechTrade AG - alle Meldungen ab Severity info per TCP an SRV-MON
@@ -89,114 +102,96 @@ log { source(s_remote); filter(f_auth); destination(d_auth); };
 *.info  @@10.10.100.20:514
 <<< Ende
 
-    gns3@SRV-WEB:~$ sudo rsyslogd -N1
-      (endet mit "End of config validation run" = OK)
-    gns3@SRV-WEB:~$ sudo systemctl restart rsyslog
+    Auf SRV-WEB:
+      sudo rsyslogd -N1
+      # endet mit "End of config validation run" = OK
+      sudo systemctl restart rsyslog
 
   R1: Meldungen ab info per UDP an SRV-MON:
-    vyos@R1:~$ configure
-    vyos@R1# set system syslog remote 10.10.100.20 facility all level info
-    vyos@R1# set system syslog remote 10.10.100.20 protocol udp
-    vyos@R1# commit
-    vyos@R1# save
-    vyos@R1# exit
+    Auf R1:
+      configure
+      set system syslog remote 10.10.100.20 facility all level info
+      set system syslog remote 10.10.100.20 protocol udp
+      commit
+      save
+      exit
+
+  Shop (nginx) zentral protokollieren, ohne Anfragen des Monitorings:
+  1) Filter: Anfragen des blackbox_exporter erkennen
+    Auf SRV-WEB:
+      sudo nano /etc/nginx/conf.d/techtrade-logfilter.conf
+
+>>> Anfang
+# TechTrade AG - Anfragen des Monitorings nicht an SRV-MON senden
+# $log_to_syslog = 0 für den blackbox_exporter, sonst 1
+map $http_user_agent $log_to_syslog {
+    ~Blackbox-Exporter  0;
+    default             1;
+}
+<<< Ende
+
+  2) Im server-Block unter der Zeile "include ..." ergänzen:
+    Auf SRV-WEB:
+      sudo nano /etc/nginx/sites-available/default
+
+>>> Anfang
+    # Lokal: alles protokollieren
+    access_log /var/log/nginx/access.log;
+    error_log  /var/log/nginx/error.log;
+    # Zentral über rsyslog an SRV-MON (ohne Anfragen des Monitorings)
+    # nohostname: nginx setzt keinen eigenen Hostnamen, das macht rsyslog
+    access_log syslog:server=unix:/dev/log,facility=local6,tag=nginx,nohostname combined if=$log_to_syslog;
+    error_log  syslog:server=unix:/dev/log,tag=nginx,nohostname;
+<<< Ende
+
+  Achtung Schreibweise: Optionen nach "syslog:" mit Komma trennen;
+  "combined" (Format) steht vor "if=", dazwischen ein Leerzeichen.
+    Auf SRV-WEB:
+      sudo nginx -t
+      sudo systemctl reload nginx
 
   Tests:
-    gns3@SRV-WEB:~$ logger -p local0.err "L14 Test von SRV-WEB"
-    vyos@R1:~$ logger -p local7.notice "L14 Test von R1"
+    Auf SRV-WEB:
+      logger -p local0.err "L14 Test von SRV-WEB"
+    Auf R1:
+      logger -p local7.notice "L14 Test von R1"
+    Auf SRV-MON:
+      curl -s http://10.10.20.13/ > /dev/null
+      curl -s http://10.10.20.13/gibtsnicht > /dev/null
     Fehlgeschlagene Anmeldung auf SRV-WEB erzeugen (von SRV-MON aus,
     beim ersten Mal "yes" eingeben, dann dreimal ein falsches Passwort):
-    gns3@SRV-MON:~$ ssh test@10.10.20.13
+    Auf SRV-MON:
+      ssh test@10.10.20.13
 
-  Ergebnis ansehen (SRV-MON):
-    gns3@SRV-MON:~$ sudo ls -l /var/log/remote/
-    gns3@SRV-MON:~$ sudo tail /var/log/remote/SRV-WEB.log
-    gns3@SRV-MON:~$ sudo tail /var/log/remote/R1.log
-    gns3@SRV-MON:~$ sudo tail /var/log/remote/auth.log
+  Ergebnis ansehen:
+    Auf SRV-MON:
+      sudo ls -l /var/log/remote/
+      sudo tail /var/log/remote/SRV-WEB.log
+      sudo grep nginx /var/log/remote/SRV-WEB.log | tail -3
+      sudo tail /var/log/remote/R1.log
+      sudo tail /var/log/remote/auth.log
     Laufend mitlesen (Abbruch mit Strg+C):
-    gns3@SRV-MON:~$ sudo tail -f /var/log/remote/SRV-WEB.log
+    Auf SRV-MON:
+      sudo tail -f /var/log/remote/SRV-WEB.log
 
-  Fehlersuche entlang der Kette:
-    Quelle erzeugt die Meldung?    gns3@SRV-WEB:~$ journalctl -n 20
-    Paket verlässt die Quelle?     gns3@SRV-WEB:~$ sudo tcpdump -ni ens3 port 514
-    Paket kommt an?                gns3@SRV-MON:~$ sudo tcpdump -ni ens3 port 514
-    Dienst hört auf dem Port?      gns3@SRV-MON:~$ sudo ss -tulpn | grep 514
-    Dienst läuft fehlerfrei?       gns3@SRV-MON:~$ systemctl status syslog-ng
-
-----------------------------------------------------------------------
-LOGS IN GRAFANA DURCHSUCHEN UND AUF LOGMUSTER ALARMIEREN
-----------------------------------------------------------------------
-  syslog-ng zusätzlich an Alloy weiterleiten (SRV-MON):
-    gns3@SRV-MON:~$ sudo nano /etc/syslog-ng/conf.d/remote.conf
-  Am Ende der Datei ergänzen:
-
->>> Anfang
-
-# Ziel: Weiterleitung an Alloy (RFC 5424 über TCP), Alloy schreibt in Loki
-destination d_alloy {
-    syslog("127.0.0.1" transport("tcp") port(1514));
-};
-log { source(s_remote); destination(d_alloy); };
-<<< Ende
-
-    gns3@SRV-MON:~$ sudo syslog-ng --syntax-only
-    gns3@SRV-MON:~$ sudo systemctl restart syslog-ng
-
-  Grafana mit Loki verbinden:
-    Firefox -> http://localhost:3000   admin / Gns3456
-    Connections -> Data sources -> Add data source -> Loki
-    URL: http://localhost:3100   -> ganz unten Save & test
-
-  Logs ansehen: Explore -> Datenquelle Loki -> Code
-    {job="syslog"}
-      Zeigt: alle Syslog-Meldungen, die über syslog-ng gekommen sind.
-    {host="SRV-WEB"}
-      Zeigt: nur Meldungen von SRV-WEB.
-    {job="syslog", severity="error"}
-      Zeigt: nur Meldungen mit Severity err (Label-Wert "error").
-    {host="SRV-WEB"} |= "Failed password"
-      Zeigt: nur Zeilen, die den Text "Failed password" enthalten.
-    sum by (host) (count_over_time({job="syslog"} |= "Failed password" [5m]))
-      Fragt:     Wie viele fehlgeschlagene SSH-Anmeldungen gab es pro Host
-                 in den letzten 5 Minuten?
-      Ergebnis:  eine Zahl pro Host (eine Linie im Graph).
-      Nutzen:    Grundlage für den Logalarm.
-    Welche Labels es gibt: im Builder-Modus Feld "Label filters" aufklappen.
-    Hinweis: Neue Meldungen erscheinen erst, nachdem syslog-ng neu gestartet
-    wurde. Ältere Meldungen stehen nur in den Dateien.
-
-  Logalarm anlegen (SRV-MON):
-    gns3@SRV-MON:~$ sudo nano /etc/loki/rules/fake/ssh.yml
-
->>> Anfang
-groups:
-  - name: logs
-    rules:
-      - alert: SSHAnmeldungenFehlgeschlagen
-        expr: sum by (host) (count_over_time({job="syslog"} |= "Failed password" [5m])) > 5
-        for: 0m
-        labels:
-          severity: warnung
-        annotations:
-          summary: "{{ $labels.host }}: mehr als 5 fehlgeschlagene SSH-Anmeldungen in 5 Minuten"
-          description: "Möglicher Angriff auf das Passwort. Erste Massnahme: Quell-IP in /var/log/remote/auth.log prüfen."
-<<< Ende
-
-  Loki liest Regeldateien selbst ein (nach ca. 1 Minute). Prüfen:
-    gns3@SRV-MON:~$ curl -s localhost:3100/loki/api/v1/rules
-      (zeigt die Regelgruppe "logs"; "no rule groups found" = noch nicht geladen)
-
-  Auslösen: zweimal hintereinander je dreimal falsches Passwort:
-    gns3@SRV-MON:~$ ssh test@10.10.20.13
-    gns3@SRV-MON:~$ ssh test@10.10.20.13
-  Alarm ansehen: http://localhost:9093 (Alertmanager), Mail in Mailpit
-  (http://localhost:8025) nach ca. 1-2 Minuten.
+  Fehlersuche entlang der Kette (von der Quelle zum Ziel):
+    1. Erzeugt die Quelle die Meldung?  Auf SRV-WEB:
+         journalctl -n 20
+    2. Verlässt das Paket die Quelle?   Auf SRV-WEB:
+         sudo tcpdump -ni ens3 port 514
+    3. Kommt das Paket an?              Auf SRV-MON:
+         sudo tcpdump -ni ens3 port 514
+    4. Hört der Dienst auf dem Port?    Auf SRV-MON:
+         sudo ss -tulpn | grep 514
+    5. Läuft der Dienst fehlerfrei?     Auf SRV-MON:
+         systemctl status syslog-ng
 
 ----------------------------------------------------------------------
-ALARMREGELN FÜR NETZ UND SHOP ERSTELLEN
+2. ALARMREGELN FÜR NETZ UND SHOP ERSTELLEN
 ----------------------------------------------------------------------
-  Regeldatei anlegen (SRV-MON):
-    gns3@SRV-MON:~$ sudo nano /etc/prometheus/alerts.yml
+  Regeldatei anlegen:
+    Auf SRV-MON:
+      sudo nano /etc/prometheus/alerts.yml
 
 >>> Anfang
 groups:
@@ -240,7 +235,8 @@ groups:
 <<< Ende
 
   Regeldatei in prometheus.yml eintragen:
-    gns3@SRV-MON:~$ sudo nano /etc/prometheus/prometheus.yml
+    Auf SRV-MON:
+      sudo nano /etc/prometheus/prometheus.yml
   Unter dem Block "alerting:" einfügen, ganz links (0 Leerzeichen):
 
 >>> Anfang
@@ -252,14 +248,49 @@ rule_files:
   /etc/prometheus unter dem Namen /config.
 
   Prüfen und neu laden:
-    gns3@SRV-MON:~$ sudo docker exec prometheus promtool check rules /config/alerts.yml
-    gns3@SRV-MON:~$ sudo docker exec prometheus promtool check config /config/prometheus.yml
-    gns3@SRV-MON:~$ curl -X POST http://localhost:9090/-/reload
+    Auf SRV-MON:
+      sudo docker exec prometheus promtool check rules /config/alerts.yml
+      sudo docker exec prometheus promtool check config /config/prometheus.yml
+      curl -X POST http://localhost:9090/-/reload
   Ansehen: Prometheus -> Alerts (alle Regeln "Inactive" = OK)
+
+  Alarme per Mail zustellen (Alertmanager):
+    Auf SRV-MON:
+      sudo nano /etc/alertmanager/alertmanager.yml
+  Die Kommentarzeilen oben behalten, alles darunter ersetzen durch:
+
+>>> Anfang
+# Mailserver: Mailpit auf SRV-MON (nimmt jede Mail an, ohne Anmeldung)
+global:
+  smtp_smarthost: 'localhost:1025'
+  smtp_from: 'alertmanager@techtrade.lab'
+  smtp_require_tls: false
+
+# Alle Alarme an den Betrieb; gleichnamige Alarme in einer Mail bündeln
+route:
+  receiver: betrieb
+  group_by: [alertname]
+  group_wait: 30s        # kurz sammeln vor der ersten Mail
+  group_interval: 1m     # neue Alarme derselben Gruppe frühestens nach 1 Min
+  repeat_interval: 1h    # Erinnerung, solange der Alarm feuert
+
+receivers:
+  - name: betrieb
+    email_configs:
+      - to: 'betrieb@techtrade.lab'
+        send_resolved: true   # Entwarnung nach der Behebung
+<<< Ende
+
+    Auf SRV-MON:
+      sudo docker exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
+      curl -X POST http://localhost:9093/-/reload
+  Ansehen: Alertmanager -> Status (geladene Konfiguration)
 
   Abfragen hinter den Regeln (Grafana -> Explore -> prometheus):
     up
       Fragt:     Liefert jedes Ziel Daten?   Ergebnis: 1 / 0 pro Ziel.
+      Achtung:   Bei shop und shop_tls ist das Ziel der blackbox_exporter
+                 auf SRV-MON, nicht nginx. Fällt nginx aus, bleibt up = 1.
     probe_success
       Fragt:     War die letzte Prüfung des Shops erfolgreich?
       Ergebnis:  1 / 0, je eine Zeile für shop und shop_tls.
@@ -268,108 +299,197 @@ rule_files:
       Ergebnis:  Sekunden, im Normalbetrieb wenige Millisekunden.
     rate(ifHCOutOctets{job="snmp", ifName="eth2"}[1m]) * 8 / 100e6 * 100
       Fragt:     Wie viel Prozent der geplanten 100 Mbit/s schickt R1
-                 ins Server-Segment?
+                 ins Server-Segment (Mittelwert der letzten Minute)?
       Ergebnis:  0-100 %, ohne Last unter 1 %.
 
   Zustände in Prometheus -> Alerts:
     Inactive  Bedingung nicht erfüllt
-    Pending   Bedingung erfüllt, Dauer (for) noch nicht abgelaufen
-    Firing    Bedingung während der ganzen Dauer erfüllt -> Alertmanager
+    Pending   Bedingung erfüllt, Mindestdauer (for) noch nicht abgelaufen
+    Firing    Bedingung während der ganzen Mindestdauer erfüllt
+              -> Prometheus übergibt den Alarm dem Alertmanager -> Mail
+  [1m] in rate() ist das Mittelungsfenster (wie wird gerechnet),
+  for: 2m die Mindestdauer (wie lange muss es so bleiben).
 
 ----------------------------------------------------------------------
-STÖRUNGEN AUSLÖSEN UND TESTPROTOKOLL FÜHREN
+3. LOGS IN GRAFANA DURCHSUCHEN UND AUF LOGMUSTER ALARMIEREN
+----------------------------------------------------------------------
+  syslog-ng zusätzlich an Alloy weiterleiten:
+    Auf SRV-MON:
+      sudo nano /etc/syslog-ng/conf.d/remote.conf
+  Am Ende der Datei ergänzen:
+
+>>> Anfang
+
+# Ziel: Weiterleitung an Alloy (RFC 5424 über TCP), Alloy schreibt in Loki
+destination d_alloy {
+    syslog("127.0.0.1" transport("tcp") port(1514));
+};
+log { source(s_remote); destination(d_alloy); };
+<<< Ende
+
+    Auf SRV-MON:
+      sudo syslog-ng --syntax-only
+      sudo systemctl restart syslog-ng
+
+  Grafana mit Loki verbinden:
+    Firefox -> http://localhost:3000   admin / Gns3456
+    Connections -> Data sources -> Add data source -> Loki
+    URL: http://localhost:3100   -> ganz unten Save & test
+
+  Logs ansehen: Explore -> Datenquelle Loki -> Code
+    {job="syslog"}
+      Zeigt: alle Syslog-Meldungen, die über syslog-ng gekommen sind.
+    {host="SRV-WEB"}
+      Zeigt: nur Meldungen von SRV-WEB.
+    {job="syslog", severity="error"}
+      Zeigt: nur Meldungen mit Severity err (Label-Wert "error").
+    {host="SRV-WEB"} |= "Failed password"
+      Zeigt: nur Zeilen, die den Text "Failed password" enthalten.
+    {app="nginx"}
+      Zeigt: Zugriffe und Fehler des Shops.
+    {app="nginx"} |~ "\" 5[0-9]{2} "
+      Zeigt: nur Zugriffe mit HTTP-Status 5xx (|~ = regulärer Ausdruck).
+    sum by (host) (count_over_time({job="syslog"} |= "Failed password" [5m]))
+      Fragt:     Wie viele fehlgeschlagene SSH-Anmeldungen gab es pro Host
+                 in den letzten 5 Minuten?
+      Ergebnis:  eine Zahl pro Host (eine Linie im Graph).
+      Nutzen:    Grundlage für den Logalarm.
+    Welche Labels es gibt: im Builder-Modus Feld "Label filters" aufklappen.
+    Hinweis: Neue Meldungen erscheinen erst, nachdem syslog-ng neu gestartet
+    wurde. Ältere Meldungen stehen nur in den Dateien.
+
+  Logalarme anlegen (beide Regeln in einer Datei):
+    Auf SRV-MON:
+      sudo nano /etc/loki/rules/fake/logs.yml
+
+>>> Anfang
+groups:
+  - name: logs
+    rules:
+      - alert: SSHAnmeldungenFehlgeschlagen
+        expr: sum by (host) (count_over_time({job="syslog"} |= "Failed password" [5m])) > 5
+        for: 0m
+        labels:
+          severity: warnung
+        annotations:
+          summary: "{{ $labels.host }}: mehr als 5 fehlgeschlagene SSH-Anmeldungen in 5 Minuten"
+          description: "Möglicher Angriff auf das Passwort. Erste Massnahme: Quell-IP in /var/log/remote/auth.log prüfen."
+
+      - alert: ShopFehlerHTTP5xx
+        expr: sum by (host) (count_over_time({app="nginx"} |~ "\" 5[0-9]{2} " [5m])) > 10
+        for: 0m
+        labels:
+          severity: kritisch
+        annotations:
+          summary: "{{ $labels.host }}: mehr als 10 Shop-Antworten mit HTTP 5xx in 5 Minuten"
+          description: "Kunden erhalten Fehlerseiten. Erste Massnahme: letztes Release und /var/log/nginx/error.log prüfen."
+<<< Ende
+
+  Texte in LogQL nur in "..." (nicht in '...'). Loki liest Regeldateien
+  selbst ein (nach ca. 1 Minute). Prüfen:
+    Auf SRV-MON:
+      curl -s localhost:3100/loki/api/v1/rules
+      # zeigt die Regelgruppe "logs" mit beiden Regeln
+      # fehlt eine Regel: Fehler in der Datei, Meldung von Loki ansehen:
+      sudo docker logs loki 2>&1 | grep -E "level=(error|warn)" | tail -5
+  Ansehen: Grafana -> Alerting -> Alert rules (Quelle logs.yml)
+
+  SSH-Alarm auslösen: zweimal hintereinander je dreimal falsches Passwort:
+    Auf SRV-MON:
+      ssh test@10.10.20.13
+      ssh test@10.10.20.13
+
+  5xx-Alarm auslösen: fehlerhaftes Release 1.2 einspielen
+    Auf SRV-WEB:
+      systemctl is-active nginx       # muss "active" sein
+      sudo dpkg -i /opt/lab/release/techtrade-shop_1.2_all.deb
+    Auf SRV-MON (100 Anfragen, etwa jede fünfte endet mit 503):
+      for i in $(seq 100); do curl -s -o /dev/null http://10.10.20.13/; done
+    Zurücksetzen (Release 1.0):
+    Auf SRV-WEB:
+      sudo dpkg -i /opt/lab/release/techtrade-shop_1.0_all.deb
+
+  Alarm ansehen: Grafana -> Alerting -> Alert rules, Alertmanager
+  (http://localhost:9093), Mail in Mailpit nach ca. 1-2 Minuten.
+
+----------------------------------------------------------------------
+4. STÖRUNGEN AUSLÖSEN UND TESTPROTOKOLL FÜHREN
 ----------------------------------------------------------------------
   Beobachten: Prometheus -> Alerts (Zustand), Mailpit (Mails mit Zeit).
   Uhrzeit für das Protokoll:  date +%T
 
   Störung Antwortzeit: Verzögerung auf SRV-WEB
-    gns3@SRV-WEB:~$ sudo tc qdisc add dev ens3 root netem delay 200ms
-    gns3@SRV-WEB:~$ tc qdisc show dev ens3          (zeigt "netem ... delay 200ms")
+    Auf SRV-WEB:
+      sudo tc qdisc add dev ens3 root netem delay 200ms
+      tc qdisc show dev ens3          # zeigt "netem ... delay 200ms"
     Zurücksetzen:
-    gns3@SRV-WEB:~$ sudo tc qdisc del dev ens3 root
+    Auf SRV-WEB:
+      sudo tc qdisc del dev ens3 root
 
   Störung Auslastung: Last ins Server-Segment (90 Mbit/s während 5 Min)
-    gns3@SRV-MON:~$ iperf3 -c 10.10.20.13 -b 90M -t 300
+    Auf SRV-MON:
+      iperf3 -c 10.10.20.13 -b 90M -t 300
     Zurücksetzen: Strg+C oder Ende abwarten.
 
   Störung Engpass: R1 eth2 auf 20 Mbit/s drosseln, dann Last erzeugen
-    vyos@R1:~$ configure
-    vyos@R1# set qos policy shaper ENGPASS bandwidth 20mbit
-    vyos@R1# set qos policy shaper ENGPASS default bandwidth 100%
-    vyos@R1# set qos policy shaper ENGPASS default queue-type drop-tail
-    vyos@R1# set qos interface eth2 egress ENGPASS
-    vyos@R1# commit
-    gns3@SRV-MON:~$ iperf3 -c 10.10.20.13 -t 300
+    Auf R1:
+      configure
+      set qos policy shaper ENGPASS bandwidth 20mbit
+      set qos policy shaper ENGPASS default bandwidth 100%
+      set qos policy shaper ENGPASS default queue-type drop-tail
+      set qos interface eth2 egress ENGPASS
+      commit
+      exit
+    Auf SRV-MON:
+      iperf3 -c 10.10.20.13 -t 300
+      # iperf3 zeigt etwa 19 Mbit/s; etwa 94 Mbit/s = Drosselung nicht aktiv
     Zurücksetzen:
-    vyos@R1# delete qos interface eth2
-    vyos@R1# delete qos policy shaper ENGPASS
-    vyos@R1# commit
-    vyos@R1# exit
+    Auf R1:
+      configure
+      delete qos interface eth2
+      delete qos policy shaper ENGPASS
+      commit
+      exit
     (kein save nötig: die Drosselung soll nicht dauerhaft bleiben)
 
   Störung Ausfall Shop:
-    gns3@SRV-WEB:~$ sudo systemctl stop nginx
+    Auf SRV-WEB:
+      sudo systemctl stop nginx
     Zurücksetzen:
-    gns3@SRV-WEB:~$ sudo systemctl start nginx
+    Auf SRV-WEB:
+      sudo systemctl start nginx
 
   Ausgangszustand prüfen nach jedem Test:
-    gns3@SRV-WEB:~$ tc qdisc show dev ens3          (kein netem)
-    gns3@SRV-WEB:~$ systemctl is-active nginx       (active)
-    vyos@R1:~$ show configuration commands | match qos   (keine Ausgabe)
+    Auf SRV-WEB:
+      tc qdisc show dev ens3          # kein netem
+      systemctl is-active nginx       # active
+    Auf R1:
+      show configuration commands | match qos   # keine Ausgabe
     Prometheus -> Alerts: alles Inactive
 
+  Weshalb nur eine Mail?  Der Alertmanager bündelt gleichnamige Alarme
+  (group_by: [alertname]) und wiederholt eine Mail erst nach
+  repeat_interval (1h). Nach der Behebung folgt genau eine Entwarnung.
+
 ----------------------------------------------------------------------
-ÜBERWACHUNG SICHERSTELLEN
+5. ÜBERWACHUNG SICHERSTELLEN
 ----------------------------------------------------------------------
-  Totmannschaltung (Watchdog): in /etc/prometheus/alerts.yml am Ende
-  der Liste "rules:" ergänzen (gleich eingerückt wie die anderen Regeln):
-
->>> Anfang
-
-      - alert: Watchdog
-        expr: vector(1)
-        labels:
-          severity: info
-        annotations:
-          summary: "Watchdog: Die Alarmkette funktioniert"
-          description: "Dieser Alarm ist immer aktiv. Bleibt die Mail aus, ist die Alarmkette unterbrochen."
-<<< Ende
-
-    gns3@SRV-MON:~$ sudo docker exec prometheus promtool check rules /config/alerts.yml
-    gns3@SRV-MON:~$ curl -X POST http://localhost:9090/-/reload
-
-  Watchdog alle 5 Minuten senden: /etc/alertmanager/alertmanager.yml,
-  unter "route:" nach repeat_interval ergänzen (2 Leerzeichen eingerückt):
-
->>> Anfang
-  routes:
-    - matchers:
-        - alertname = "Watchdog"
-      receiver: betrieb
-      repeat_interval: 5m
-<<< Ende
-
-    gns3@SRV-MON:~$ sudo docker exec alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
-    gns3@SRV-MON:~$ curl -X POST http://localhost:9093/-/reload
-
   Ausfall eines Exporters:
-    gns3@SRV-WEB:~$ sudo systemctl stop prometheus-node-exporter
+    Auf SRV-WEB:
+      sudo systemctl stop prometheus-node-exporter
+    Ansehen: Prometheus -> Status -> Target health (node DOWN),
+             Alerts: ZielNichtErreichbar, Mail in Mailpit
     Zurücksetzen:
-    gns3@SRV-WEB:~$ sudo systemctl start prometheus-node-exporter
-
-  Ausfall der Alarmkette selbst (Alertmanager stoppen):
-    gns3@SRV-MON:~$ sudo docker stop alertmanager
-    Zurücksetzen:
-    gns3@SRV-MON:~$ sudo docker start alertmanager
+    Auf SRV-WEB:
+      sudo systemctl start prometheus-node-exporter
 
   Wartungsfenster (Silence):
     Alertmanager http://localhost:9093 -> New Silence
-    Matcher: alertname = ShopNichtVerfuegbar   Duration: 15m
+    Matcher: alertname="ShopNichtVerfuegbar"   Duration: 15m
+    (Wert in Anführungszeichen, dann + oder Enter: Matcher erscheint als Chip)
     Creator und Comment (Grund) ausfüllen -> Create
     Dann nginx stoppen: Alarm erscheint in Prometheus als Firing,
-    aber es kommt keine Mail. Danach nginx starten, Silence beenden
-    (Silences -> Expire).
-
-  Gruppierung ansehen: nginx stoppen -> ShopNichtVerfuegbar feuert für
-  shop und shop_tls. Die Mail enthält beide Alarme, weil der
-  Alertmanager nach alertname gruppiert (group_by: [alertname]).
+    aber es kommt keine Mail. Im Alertmanager sind stummgeschaltete
+    Alarme nur mit dem Häkchen "Silenced" sichtbar.
+    Danach nginx starten, Silence beenden (Silences -> Expire).
+    Zeiten im Alertmanager sind in UTC (Schweiz: UTC+1, Sommer UTC+2).
