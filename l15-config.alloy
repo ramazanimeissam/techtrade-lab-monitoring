@@ -1,0 +1,48 @@
+// Grafana Alloy auf SRV-WEB: Container-Logs nach Loki, Container-Metriken nach Prometheus
+
+// Container auf diesem Host finden
+discovery.docker "container" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Containername als Label "container" (ohne führenden Schrägstrich)
+discovery.relabel "container" {
+  targets = discovery.docker.container.targets
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+// LOGS: stdout/stderr aller Container lesen und an Loki auf SRV-MON senden
+loki.source.docker "container" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.container.targets
+  relabel_rules = discovery.relabel.container.rules
+  forward_to    = [loki.write.srv_mon.receiver]
+}
+
+loki.write "srv_mon" {
+  endpoint {
+    url = "http://10.10.100.20:3100/loki/api/v1/push"
+  }
+}
+
+// METRIKEN: eingebauter cAdvisor
+prometheus.exporter.cadvisor "docker" {
+  docker_host = "unix:///var/run/docker.sock"
+}
+
+prometheus.scrape "cadvisor" {
+  targets         = prometheus.exporter.cadvisor.docker.targets
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.srv_mon.receiver]
+}
+
+// Alloy sendet (push) an Prometheus auf SRV-MON
+prometheus.remote_write "srv_mon" {
+  endpoint {
+    url = "http://10.10.100.20:9090/api/v1/write"
+  }
+}
