@@ -1,0 +1,497 @@
+PLAN-200 Lektion 15 - Cheatsheet Container-Plattform / Vorfälle
+=====================================================================
+
+SYSTEME
+  R1 (VyOS)  eth1 10.10.100.1 (Mgmt, SRV-MON)  eth2 10.10.20.1 (Server, SRV-WEB)
+             eth0 DHCP (Internet)    Login vyos / Gns3456
+  SRV-MON    10.10.100.20            Login gns3 / Gns3456
+             Prometheus    Firefox -> http://localhost:9090
+             Alertmanager  Firefox -> http://localhost:9093
+             Mailpit       Firefox -> http://localhost:8025  (Posteingang der Alarme)
+             Grafana       Firefox -> http://localhost:3000  (admin / Gns3456)
+                           Datenquellen prometheus (Messwerte) und loki (Logs),
+                           Dashboard "Shop-Plattform"
+  SRV-WEB    10.10.20.13             Login gns3 / Gns3456
+             Docker-Host: Shop-Stack (/opt/shop), node_exporter :9100,
+             Alloy (sendet die Logs aller Container an Loki auf SRV-MON)
+             Shop von SRV-MON aus: Firefox -> http://10.10.20.13
+
+KONFIGURATIONSDATEIEN
+  SRV-WEB  /opt/lab/uebung/                Dockerfile-Übung (Dockerfile, security.conf)
+  SRV-WEB  /opt/shop/compose.yaml          Shop-Stack: proxy, app, db
+  SRV-WEB  /opt/shop/.env                  Variablen: Version der App, Datenbank-Host
+  SRV-WEB  /opt/shop/nginx/default.conf    Reverse Proxy (im Container proxy)
+  SRV-WEB  /opt/shop/secrets/              Passwort der Datenbank
+  SRV-WEB  /opt/cadvisor/compose.yaml      cAdvisor (Messung pro Container)
+  SRV-WEB  /opt/alloy/                     Alloy (Container-Logs -> Loki), fertig eingerichtet
+  SRV-WEB  /backup/                        Datensicherungen
+  SRV-MON  /etc/prometheus/prometheus.yml  Jobs (Messziele)
+  SRV-MON  /etc/prometheus/alerts.yml      Alarmregeln
+  SRV-MON  /etc/alertmanager/alertmanager.yml   Mail an betrieb@techtrade.lab
+
+  Cheatsheet im Editor öffnen (zum Kopieren):  mousepad ~/lab-cheatsheet.txt &
+  Blöcke zwischen ">>> Anfang" und "<<< Ende" übernehmen (Markierungen
+  nicht mitkopieren). <...> ist ein Platzhalter: durch den Wert aus der
+  Anforderung ersetzen, ohne die spitzen Klammern. YAML: nur Leerzeichen,
+  keine Tabs; die Einrückung bestimmt, was wozu gehört.
+
+  Docker auf SRV-WEB immer mit sudo (Benutzer gns3 ist nicht in der
+  Gruppe docker - Mitglieder dieser Gruppe haben faktisch root-Rechte).
+
+  Compose-Befehle immer im Ordner des Projekts ausführen (dort liegt
+  compose.yaml). Jeder Abschnitt unten beginnt deshalb mit cd.
+
+  Anfragen mit User-Agent "Zabbix" oder "Blackbox-Exporter" in den Logs
+  stammen vom Monitoring, nicht von Kunden.
+
+  Maus reagiert im Fenster nicht mehr (SRV-MON oder SRV-WEB):
+    sudo systemctl restart lightdm
+
+----------------------------------------------------------------------
+1. DOCKER-GRUNDLAGEN
+----------------------------------------------------------------------
+  Dieser Auftrag steht für sich (Werkzeuge kennenlernen). Der Shop-Stack
+  ab Auftrag 2 baut nicht darauf auf.
+
+  Ausgangslage ansehen:
+    Auf SRV-WEB:
+      cd /opt/lab/uebung
+      cat Dockerfile
+      cat security.conf
+      sudo docker images             # lokal vorhandene Images (Name, Tag, ID, Grösse)
+
+  Dockerfile anpassen:
+    Auf SRV-WEB:
+      cd /opt/lab/uebung
+      sudo nano Dockerfile
+  Gesamten Inhalt ersetzen und die Platzhalter nach den Anforderungen D1
+  bis D6 ausfüllen. Die Zeilen "# <Kommentar ...>" durch Ihre Begründung
+  ersetzen.
+
+>>> Anfang
+# TechTrade nginx-Image (Basis für die Webserver des Betriebs)
+# <Kommentar: weshalb eine feste Version>
+FROM nginx:<version>
+# <Kommentar: was diese Datei bewirkt>
+COPY security.conf <zielordner>/
+# <Kommentar: wozu die Beschriftung dient>
+LABEL org.opencontainers.image.vendor="<firma>" \
+      org.opencontainers.image.version="<version>"
+# <Kommentar: was EXPOSE dokumentiert>
+EXPOSE <port>
+# <Kommentar: was die Prüfung feststellt>
+HEALTHCHECK --interval=<sekunden>s --timeout=<sekunden>s --retries=<anzahl> \
+  CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
+<<< Ende
+
+  Was die Anweisungen bedeuten:
+    FROM         Basis-Image, auf dem das eigene Image aufbaut (Name:Tag)
+    COPY a b     Datei a aus dem Ordner des Dockerfiles ins Image nach b kopieren
+                 (nginx liest alle *.conf in /etc/nginx/conf.d/)
+    LABEL k="v"  Beschriftung des Images; org.opencontainers.image.* sind
+                 Standardnamen, die viele Werkzeuge anzeigen. \ = Zeile geht weiter
+    EXPOSE 80    dokumentiert den Port der Anwendung (veröffentlicht ihn nicht)
+    HEALTHCHECK  Docker führt den Befehl regelmässig im Container aus;
+                 Exit-Code 0 = healthy, sonst Fehlversuch.
+                 --interval Abstand, --timeout maximale Dauer,
+                 --retries Fehlversuche in Folge bis "unhealthy"
+                 wget -q -O /dev/null = Seite abrufen, still, Inhalt verwerfen;
+                 || exit 1 = bei Fehler Exit-Code 1
+
+  Image bauen:
+    Auf SRV-WEB:
+      cd /opt/lab/uebung
+      sudo docker build -t techtrade/nginx:1.0 .
+      # build = Image aus dem Dockerfile bauen; -t = Name:Tag vergeben;
+      # . = Dockerfile und Dateien im aktuellen Ordner
+      sudo docker images techtrade/nginx
+
+  Basis-Image und eigenes Image nebeneinander starten:
+    Auf SRV-WEB:
+      sudo docker run -d --name web -p 8090:80 nginx:1.30.5-alpine
+      # run = Container erstellen und starten; -d = im Hintergrund;
+      # --name = Containername; -p Host-Port:Container-Port
+      sudo docker run -d --name techtrade -p 8091:80 techtrade/nginx:1.0
+      sudo docker ps                 # laufende Container, Ports, Status
+      # nach ca. 10 s zeigt techtrade "(healthy)", web hat keinen Healthcheck
+
+  Vergleich der Antworten:
+    Auf SRV-WEB:
+      curl -I http://localhost:8090  # -I = nur die Header der Antwort
+      # Server: nginx/1.30.5, keine Sicherheits-Header
+      curl -I http://localhost:8091
+      # Server: nginx (ohne Version), X-Content-Type-Options, X-Frame-Options,
+      # Referrer-Policy
+
+  Container untersuchen:
+    Auf SRV-WEB:
+      sudo docker logs web           # Ausgabe des Containers (hier: Zugriffe)
+      sudo docker logs -f --tail 5 web   # -f = live folgen (Ende mit Strg+C), --tail 5 = letzte 5 Zeilen
+      sudo docker inspect web        # alle Details als JSON
+      sudo docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' web
+      # --format = nur bestimmte Felder ausgeben (Zustand, Exit-Code)
+      sudo docker inspect --format '{{.NetworkSettings.Ports}}' web
+      sudo docker inspect --format '{{json .Config.Labels}}' techtrade
+      sudo docker inspect --format '{{.State.Health.Status}}' techtrade
+      sudo docker exec web nginx -v  # exec = Befehl im laufenden Container ausführen
+
+  Lebenszyklus:
+    Auf SRV-WEB:
+      sudo docker stop web
+      sudo docker ps                 # web fehlt: ps zeigt nur laufende Container
+      sudo docker ps -a              # -a = auch gestoppte; web: Exited (0)
+      sudo docker start web
+      sudo docker rm -f web techtrade   # rm = löschen; -f = auch wenn er läuft
+      sudo docker ps -a              # beide gelöscht
+
+  Tags und Digest (zwei Versionen desselben Images):
+    Auf SRV-WEB:
+      sudo docker images nginx
+      sudo docker image inspect --format '{{.RepoDigests}}' nginx:1.30.5-alpine
+      sudo docker image inspect --format '{{.RepoDigests}}' nginx:1.30.6-alpine
+      # Tag = Name, der verschoben werden kann; Digest (sha256:...) = Prüfsumme,
+      # bezeichnet genau einen Inhalt
+
+----------------------------------------------------------------------
+2. SHOP-STACK IN BETRIEB NEHMEN
+----------------------------------------------------------------------
+  Stack lesen:
+    Auf SRV-WEB:
+      cd /opt/shop
+      cat compose.yaml
+      cat .env
+      sudo docker compose config     # zeigt die Datei so, wie Compose sie anwendet:
+                                     # compose.yaml + Werte aus .env + Standardwerte
+      sudo docker compose config -q  # -q = nur prüfen; keine Ausgabe = gültig
+
+  Starten und Status:
+    Auf SRV-WEB:
+      cd /opt/shop
+      sudo docker compose up -d      # alle Dienste erstellen und im Hintergrund starten
+      sudo docker compose ps         # Container des Projekts mit Status und Ports
+      sudo docker compose logs app   # Logs eines Dienstes
+      curl -s http://localhost | grep -o "Bestellungen: [0-9]*"
+      # curl -s = still (ohne Fortschrittsanzeige); grep -o = nur den Treffer ausgeben
+
+  Bestellung von aussen (über Netz, Firewall und Reverse Proxy):
+    Firefox auf SRV-MON -> http://10.10.20.13 -> Artikel bestellen
+    oder:
+    Auf SRV-MON:
+      curl -s -o /dev/null -w "%{http_code}\n" -d "artikel=NB-14&menge=1" http://10.10.20.13/bestellen
+      # -o /dev/null = Inhalt verwerfen; -w = nur den HTTP-Status ausgeben;
+      # -d = Formulardaten senden (POST)
+      # 303 = Bestellung gespeichert, weiter zur Startseite
+    HTTPS prüfen:
+      curl -sk -o /dev/null -w "%{http_code}\n" https://10.10.20.13
+      # -k = selbst signiertes Zertifikat akzeptieren (Lab)
+  Kontrolle: Mailpit zeigt die Entwarnung [RESOLVED] ShopNichtVerfuegbar.
+
+  Netze und Namensauflösung:
+    Auf SRV-WEB:
+      cd /opt/shop
+      sudo docker network inspect shop_backend | grep Name
+      # welche Container hängen im Netz backend?
+      sudo docker compose exec app getent hosts db
+      # getent hosts = Namen auflösen wie die Anwendung: IP-Adresse von db
+      sudo docker compose exec proxy ping -c 1 db
+      # -c 1 = ein Paket; proxy ist nicht im Netz backend: "bad address 'db'"
+
+  Persistenz:
+    Auf SRV-WEB:
+      cd /opt/shop
+      curl -s http://localhost | grep -o "Bestellungen: [0-9]*"
+      sudo docker compose down       # Container und Netze weg, Volume bleibt
+      sudo docker compose up -d
+      curl -s http://localhost | grep -o "Bestellungen: [0-9]*"   # gleicher Stand
+
+----------------------------------------------------------------------
+3. KONZEPT UMSETZEN: MONITORING UND WARTUNG
+----------------------------------------------------------------------
+  cAdvisor-Compose vervollständigen:
+    Auf SRV-WEB:
+      cd /opt/cadvisor
+      cat compose.yaml
+      sudo nano compose.yaml
+  Gesamten Inhalt ersetzen und die Platzhalter nach C1 bis C5 ausfüllen:
+
+>>> Anfang
+# cAdvisor - misst CPU, Arbeitsspeicher, Netz und Disk pro Container (SRV-WEB)
+services:
+  cadvisor:
+    # <Kommentar: weshalb eine feste Version>
+    image: ghcr.io/google/cadvisor:<version>
+    ports:
+      # <Kommentar: welcher Port wo>
+      - "<host-port>:<container-port>"
+    volumes:
+      # <Kommentar: weshalb diese Option>
+      - /:/rootfs:<option>
+      - /var/run:/var/run:<option>
+      - /sys:/sys:<option>
+      - /var/lib/docker/:/var/lib/docker:<option>
+      - /dev/disk/:/dev/disk:<option>
+    devices:
+      - /dev/kmsg
+    privileged: true
+    # <Kommentar: wann der Container wieder startet>
+    restart: <policy>
+<<< Ende
+
+  Was die Einträge bedeuten:
+    image          Name:Tag des Images
+    ports          "Host-Port:Container-Port" (Anfrage an den Host wird weitergeleitet)
+    volumes        Host-Pfad:Pfad im Container:Option; ro = nur lesend, rw = lesen
+                   und schreiben (Standard)
+    devices        Gerät des Hosts im Container (Kernel-Meldungen)
+    privileged     erweiterte Rechte auf dem Host (cAdvisor liest Kernel-Daten)
+    restart        no = nie (Standard); always = immer; unless-stopped = immer,
+                   ausser von Hand gestoppt; on-failure = nur nach Fehler
+
+    Auf SRV-WEB:
+      cd /opt/cadvisor
+      sudo docker compose config -q
+      sudo docker compose up -d
+      sudo docker compose ps
+      curl -s http://localhost:8081/metrics | less
+      # less = seitenweise lesen: Leertaste weiter, /shop-app suchen, q beenden
+      # Zeilen container_... {name="shop-app-1",...} = Messwerte pro Container
+
+  Prometheus-Job cadvisor:
+    Auf SRV-MON:
+      sudo nano /etc/prometheus/prometheus.yml
+  Unter scrape_configs als weiteren Job einfügen, gleich eingerückt wie
+  der Job prometheus (2 Leerzeichen vor "- job_name"). IP-Adresse von
+  SRV-WEB und Host-Port aus C2 einsetzen:
+
+>>> Anfang
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['<ip-adresse>:<port>']
+<<< Ende
+
+  Zwei Alarmregeln ergänzen (K2, K3):
+    Auf SRV-MON:
+      sudo nano /etc/prometheus/alerts.yml
+  Ganz unten anfügen, gleich eingerückt wie "- alert: ZielNichtErreichbar"
+  (6 Leerzeichen vor "- alert"). Platzhalter nach K2 und K3 ausfüllen:
+
+>>> Anfang
+      - alert: ShopContainerFehlt
+        expr: count(count by (name) (container_last_seen{name=~"shop-(proxy|app|db)-1"})) < 3 or absent(container_last_seen{name=~"shop-(proxy|app|db)-1"})
+        for: <dauer>
+        labels:
+          severity: <schweregrad>
+        annotations:
+          summary: "Shop-Stack: nicht alle drei Container laufen"
+          description: "<Text: was fehlt und erste Massnahme>"
+
+      - alert: ContainerSpeicherKnapp
+        expr: container_memory_working_set_bytes{name=~"shop-.*"} / (container_spec_memory_limit_bytes{name=~"shop-.*"} > 0) * 100 > <prozent>
+        for: <dauer>
+        labels:
+          severity: <schweregrad>
+        annotations:
+          summary: "{{ $labels.name }} nutzt {{ $value | printf \"%.0f\" }} % seines Speicherlimits"
+          description: "<Text: was zu tun ist>"
+<<< Ende
+
+  Was die Regeln abfragen:
+    ShopContainerFehlt
+      Fragt:    Wie viele der drei Container proxy, app und db meldet cAdvisor?
+                count by (name) zählt jeden Namen einmal, auch wenn cAdvisor
+                nach einem Neustart mehrere Messreihen liefert.
+                absent(...) = es kommen gar keine Werte (cAdvisor ausgefallen).
+      Ergebnis: feuert, wenn weniger als 3 Container laufen.
+    ContainerSpeicherKnapp
+      Fragt:    Wie viel Prozent seines Speicherlimits belegt jeder Container?
+                "> 0" lässt Container ohne Limit weg (kein Teilen durch 0).
+      Ergebnis: feuert pro Container über dem Schwellenwert.
+    for: 1m = Bedingung muss 1 Minute lang ununterbrochen erfüllt sein.
+    {{ $labels.name }} und {{ $value }} setzen Container und Wert in den Text.
+
+  Prüfen und neu laden:
+    Auf SRV-MON:
+      sudo docker exec prometheus promtool check rules /config/alerts.yml
+      sudo docker exec prometheus promtool check config /config/prometheus.yml
+      curl -X POST http://localhost:9090/-/reload
+      # -X POST = Anfrage-Methode POST; /-/reload = Konfiguration neu einlesen
+  Ansehen: Prometheus -> Status -> Target health (cadvisor UP)
+           Prometheus -> Alerts (neue Regeln Inactive = OK)
+
+  Abfragen in Grafana -> Explore -> prometheus -> Code:
+    container_memory_working_set_bytes{name=~"shop-.*"}
+      Fragt:    Wie viel Arbeitsspeicher belegt jeder Shop-Container gerade?
+      Ergebnis: Bytes pro Container (Einheit bytes(IEC)); app im Leerlauf ca. 20-40 MB.
+      Nutzen:   Normalverbrauch kennen, Limit begründen, Speicherleck erkennen.
+      Tipp:     Options -> Legend -> Custom:  {{name}} {{container_label_restartcount}}
+                Nach jedem Neustart eines Containers beginnt eine neue Linie
+                (Neustart-Zähler im Namen); die Linie der beendeten Instanz
+                kann noch eine Weile flach weiterlaufen.
+    sum by (name) (rate(container_cpu_usage_seconds_total{name=~"shop-.*"}[1m])) * 100
+      Fragt:    Wie viel Prozent einer CPU nutzt jeder Container?
+      Ergebnis: Prozent pro Container; im Leerlauf unter 1 %.
+      Nutzen:   Verursacher bei hoher Last finden.
+
+  Logs in Grafana (Alloy auf SRV-WEB sendet sie an Loki):
+    Grafana -> Explore -> loki -> Code:
+    {container="shop-app-1"}
+      Fragt:    Alle Logzeilen der Shop-Anwendung im gewählten Zeitraum.
+    {container=~"shop-.*"} |= "FEHLER"
+      Fragt:    Zeilen mit "FEHLER" aus allen Shop-Containern.
+      {...} wählt die Quelle über Labels (container, host); =~ = regulärer
+      Ausdruck; |= "Text" = Zeile enthält Text; |~ "a|b" = enthält a oder b.
+
+  Wartung: Datensicherung vor dem Update (K4):
+    Auf SRV-WEB:
+      cd /opt/shop
+      sudo docker compose exec -T db pg_dump -U shop shop | sudo tee /backup/shop_vor_update.sql > /dev/null
+      # exec -T = ohne Terminal (nötig, wenn die Ausgabe in eine Pipe geht)
+      # pg_dump -U shop shop = Benutzer shop, Datenbank shop; gibt SQL aus
+      # | sudo tee Datei > /dev/null = als root in die Datei schreiben,
+      #   Bildschirmausgabe verwerfen
+      ls -l /backup
+      grep -A 5 "COPY public.bestellungen" /backup/shop_vor_update.sql
+      # -A 5 = Treffer und die 5 folgenden Zeilen (die ersten Bestellungen)
+
+  Pre-Check (Ausgangszustand festhalten):
+    Auf SRV-WEB:
+      cd /opt/shop
+      sudo docker compose ps
+      sudo docker compose exec proxy nginx -v
+      curl -s http://localhost | grep -o "Bestellungen: [0-9]*"
+      curl -sk -o /dev/null -w "%{http_code}\n" https://localhost
+
+  Patch einspielen (K5):
+    Auf SRV-WEB:
+      cd /opt/shop
+      sudo nano compose.yaml
+  Beim Dienst proxy die Zeile image ersetzen (Einrückung wie bisher, 4 Leerzeichen):
+
+>>> Anfang
+    # <Kommentar: Wartung, Grund, Rückweg>
+    image: nginx:<neue-version>-alpine
+<<< Ende
+
+    Auf SRV-WEB:
+      cd /opt/shop
+      sudo docker compose config -q
+      sudo docker compose up -d      # nur proxy wird neu erstellt (nur er hat sich geändert)
+
+  Post-Check: dieselben Befehle wie beim Pre-Check, Ergebnis vergleichen.
+      sudo docker compose exec proxy nginx -v      # neue Version
+
+  Aufräumen (K6):
+    Auf SRV-WEB:
+      sudo docker system df          # Speicherbedarf von Images, Containern, Volumes
+      sudo docker images nginx
+      sudo docker image rm nginx:<alte-version>-alpine
+      sudo docker image prune -f     # Images ohne Tag löschen; -f = ohne Rückfrage
+
+----------------------------------------------------------------------
+4. VORFÄLLE ANALYSIEREN UND BEHEBEN
+----------------------------------------------------------------------
+  Ablauf bei jedem Vorfall:
+    1. Uhrzeit notieren (date), Vorfall auslösen
+    2. Meldung abwarten: Mailpit (Zeit bis zur Mail = MTTD)
+    3. Überblick in Grafana: Dashboards -> Shop-Plattform
+       (Shop erreichbar? Welcher Container? Speicher? Logs mit Fehlern?)
+    4. Details auf der Kommandozeile, Sofortmassnahme, Wirkung belegen
+
+  --- V-01: Datenbank fällt aus
+    Auslösen:
+    Auf SRV-WEB:
+      cd /opt/shop
+      date
+      sudo docker compose stop db    # stop = Container anhalten, nicht löschen
+    Meldung: Mailpit -> ShopNichtVerfuegbar (und ShopContainerFehlt)
+    Grafana, Dashboard Shop-Plattform:
+      Shop erreichbar: NEIN; Shop-Container laufen: 2
+      Logs: "FEHLER: Datenbank db:5432 nicht erreichbar"
+    Kommandozeile:
+    Auf SRV-WEB:
+      cd /opt/shop
+      curl -s -o /dev/null -w "%{http_code}\n" http://localhost   # 500
+      sudo docker compose ps -a                # db: Exited
+      sudo docker compose logs --tail 5 app    # dieselbe Fehlermeldung
+    Sofortmassnahme:
+      sudo docker compose start db
+    Wirkung prüfen:
+      curl -s http://localhost | grep -o "Bestellungen: [0-9]*"
+      Mailpit: [RESOLVED] ...; Dashboard: Shop erreichbar JA, 3 Container
+
+  --- V-02: Fehlerhaftes Release
+    Auslösen:
+    Auf SRV-WEB:
+      cd /opt/shop
+      date
+      sudo nano .env                 # SHOP_VERSION=1.5
+      sudo docker compose up -d      # erstellt app mit der neuen Version neu
+      for i in $(seq 1 60); do curl -s -o /dev/null http://localhost; done
+      # Schleife: 60 Aufrufe nacheinander
+    Hinweis: Jede Anfrage belegt in Version 1.5 Speicher, auch die Prüfung
+    des Monitorings alle 15 s. Die App wird deshalb auch ohne die Schleife
+    alle paar Minuten beendet.
+    Meldung: Mailpit -> ContainerSpeicherKnapp (kann einige Minuten dauern)
+    Grafana, Dashboard Shop-Plattform:
+      Speicher shop-app-1 steigt bis zur Limit-Linie, dann beginnt eine neue
+      Linie bei ca. 30 MB (Neustart); Logs: "Warenkorb-Cache: N Einträge"
+      wächst, "TechTrade Shop 1.5 startet" nach jedem Neustart
+    Kommandozeile:
+    Auf SRV-WEB:
+      cd /opt/shop
+      sudo docker compose ps                   # app: "Up xx seconds" (frisch gestartet)
+      sudo docker inspect --format 'Neustarts: {{.RestartCount}}' shop-app-1
+      sudo docker events --since 10m --until 0s --filter container=shop-app-1
+      # events = Ereignisse von Docker; --since/--until = Zeitraum;
+      # "oom" und "die ... exitCode=137" = vom Kernel beendet, Speicherlimit
+      sudo docker stats --no-stream            # Speicher und Limit pro Container, einmal
+      sudo docker compose logs --tail 10 app   # "Warenkorb-Cache" wächst
+    Evidenz sichern (vor dem Rollback - danach sind Logs und Events des
+    alten Containers weg):
+      sudo docker compose ps -a > /tmp/vorfall_ps.txt
+      sudo docker compose logs --no-color --timestamps app > /tmp/vorfall_logs.txt
+      sudo docker events --since 30m --until 0s --filter container=shop-app-1 > /tmp/vorfall_events.txt
+      sudo docker inspect shop-app-1 > /tmp/vorfall_inspect.json
+      # > Datei = Ausgabe in eine Datei schreiben
+    Sofortmassnahme (Rollback auf die letzte bewährte Version):
+      sudo nano .env                 # SHOP_VERSION=1.4
+      sudo docker compose up -d
+    Wirkung prüfen:
+      sudo docker compose ps
+      curl -s http://localhost | grep -o "Version [0-9.]*"
+      for i in $(seq 1 60); do curl -s -o /dev/null http://localhost; done
+      sudo docker stats --no-stream  # Speicher app bleibt konstant
+      Dashboard: Speicher shop-app-1 flach
+
+  Ausgangszustand nach den Vorfällen:
+    Auf SRV-WEB:
+      cd /opt/shop
+      grep SHOP_VERSION .env         # 1.4
+      sudo docker compose ps         # drei Container Up
+    Prometheus -> Alerts: alles Inactive
+
+----------------------------------------------------------------------
+5. URSACHE UNTERSUCHEN (VORFALL V-02)
+----------------------------------------------------------------------
+  Daten für den Zeitstrahl sammeln:
+    Auf SRV-WEB:
+      cd /opt/shop
+      sudo docker events --since 2h --until 0s --filter container=shop-app-1
+      sudo docker events --since 2h --until 0s --filter container=shop-app-1 --filter event=oom
+      # nur die OOM-Ereignisse: Zeitpunkte, an denen das Limit erreicht war
+      sudo docker compose logs --timestamps app | grep -E "startet|Warenkorb" | tail -30
+      # grep -E "a|b" = Zeilen mit a oder b; tail -30 = letzte 30 Zeilen
+      cat /tmp/vorfall_events.txt    # gesicherte Evidenz aus Auftrag 4
+    Mailpit: Zeitpunkte der Alarm- und Entwarnungsmails
+    Alertmanager und Prometheus zeigen Zeiten in UTC (Schweiz: UTC+1,
+    Sommer UTC+2). Grafana, Logs und docker events zeigen Lokalzeit.
+
+  Grafana -> Explore (Zeitraum: Vorfall):
+    prometheus:  container_memory_working_set_bytes{name="shop-app-1"}
+      Fragt:    Wie entwickelt sich der Speicher der App über die Zeit?
+      Ergebnis: wächst bis zum Limit (256 MB); nach jedem Neustart beginnt
+                eine neue Linie bei ca. 30 MB.
+      Nutzen:   Beleg für Speicherleck und Beenden durch den Kernel (OOM).
+    loki:        {container="shop-app-1"} |~ "startet|Warenkorb"
+      Fragt:    Wann startete die App, wie wuchs der Cache?
+      Nutzen:   Neustarts und Wachstum mit Uhrzeit für den Zeitstrahl.
