@@ -1,9 +1,10 @@
 =====================================================================
  PLAN-200 · Lektion 16 · Lab-Cheatsheet
- DNS mit BIND 9 · Mitschnitt mit Wireshark/tshark · Kennzahlen
+ DNS mit BIND 9 · Packet Capture mit Wireshark/tshark · Kennzahlen
 =====================================================================
  Jeder Block nennt das System, auf dem er läuft (Zeile «Auf ...:»).
  Zeilen mit # sind Erklärungen und werden nicht eingetippt.
+ <...> sind Platzhalter: durch den passenden Wert ersetzen (ohne < >).
  Passwort überall: Gns3456  (Server: gns3, R1: vyos, Grafana: admin)
 
  Systeme
@@ -30,8 +31,8 @@ sudo nano named.conf.options         # gesamten Inhalt durch den Block unten ers
 // Interne Netze: nur diese erhalten Antworten und Rekursion (Z5)
 acl intern {
     10.10.20.0/24;
-    10.10.30.0/24;
-    10.10.100.0/24;
+    <netz>/<präfix>;                 // weiteres internes Netz aus Z5
+    <netz>/<präfix>;                 // weiteres internes Netz aus Z5
     localhost;
 };
 
@@ -98,46 +99,60 @@ r1       IN A     10.10.100.1
 shop     IN CNAME srv-web            ; Alias (Z3) - ohne Punkt = relativ zur Zone
 
 # Namen MIT Punkt am Ende sind absolut, Namen OHNE Punkt werden mit der Zone ergänzt.
+# In Zonendateien beginnen Kommentare mit ; (nicht mit #).
 
 
 --- Reverse-Zonen -----------------------------------------------------
 
+# Eine Reverse-Zone pro Subnetz: IP-Adresse -> Name (PTR).
+# Die Datei steht bereits für das Subnetz, in der Zeile steht nur das letzte Oktett.
+# Der Name rechts endet IMMER mit einem Punkt, sonst hängt BIND die Zone an.
+
+# Beispiel komplett: Server-LAN 10.10.20.0/24
 Auf SRV-DNS:
 sudo nano /etc/bind/zones/db.10.10.20
 
 $TTL 3600
 @   IN SOA ns1.techtrade.lab. hostmaster.techtrade.lab. ( 2026110101 7200 900 1209600 300 )
 @   IN NS  ns1.techtrade.lab.
-13  IN PTR srv-web.techtrade.lab.
+13  IN PTR srv-web.techtrade.lab.          ; 10.10.20.13 -> srv-web
 
+# DNS-LAN 10.10.30.0/24 - Kopf bleibt gleich, Platzhalter mit Werten aus der Adressliste ersetzen
+Auf SRV-DNS:
 sudo nano /etc/bind/zones/db.10.10.30
 
 $TTL 3600
 @   IN SOA ns1.techtrade.lab. hostmaster.techtrade.lab. ( 2026110101 7200 900 1209600 300 )
 @   IN NS  ns1.techtrade.lab.
-53  IN PTR srv-dns.techtrade.lab.
+<LETZTES_OKTETT>  IN PTR  <HOSTNAME>.techtrade.lab.
 
+# Management-LAN 10.10.100.0/24 - zwei Systeme, also zwei PTR-Zeilen
+Auf SRV-DNS:
 sudo nano /etc/bind/zones/db.10.10.100
 
 $TTL 3600
 @   IN SOA ns1.techtrade.lab. hostmaster.techtrade.lab. ( 2026110101 7200 900 1209600 300 )
 @   IN NS  ns1.techtrade.lab.
-1   IN PTR r1.techtrade.lab.
-20  IN PTR srv-mon.techtrade.lab.
+<LETZTES_OKTETT>  IN PTR  <HOSTNAME>.techtrade.lab.
+<LETZTES_OKTETT>  IN PTR  <HOSTNAME>.techtrade.lab.
 
 
---- Prüfen und laden (Z6) ---------------------------------------------
+--- Prüfen und laden --------------------------------------------------
 
 Auf SRV-DNS:
 sudo named-checkconf                 # keine Ausgabe = Konfiguration OK
-cd /etc/bind/zones
+cd /etc/bind/zones                   # damit unten kurze Dateinamen genügen
 sudo named-checkzone techtrade.lab db.techtrade.lab           # «OK» am Ende
 sudo named-checkzone 20.10.10.in-addr.arpa db.10.10.20
 sudo named-checkzone 30.10.10.in-addr.arpa db.10.10.30
 sudo named-checkzone 100.10.10.in-addr.arpa db.10.10.100
+# named-checkzone <Zone> <Datei>: lädt die Datei wie BIND (Syntax, SOA, NS, CNAME-Konflikte).
+# Der Zonenname wird gebraucht, um Namen ohne Punkt zu ergänzen.
+# Inhaltlich falsche Einträge (falsche IP, fehlender Punkt) meldet die Prüfung NICHT.
 sudo systemctl reload named          # Konfiguration und Zonen neu laden, ohne Unterbruch
 sudo systemctl status named --no-pager    # active (running), keine Fehler unten
 sudo journalctl -u named -n 20 --no-pager # letzte 20 Logzeilen: «zone ... loaded serial ...»
+# --no-pager = Ausgabe direkt ins Terminal (sonst Blätteransicht, Ende mit q)
 
 
 --- Testen direkt am Server -------------------------------------------
@@ -145,22 +160,31 @@ sudo journalctl -u named -n 20 --no-pager # letzte 20 Logzeilen: «zone ... load
 Auf SRV-DNS:
 dig @127.0.0.1 srv-web.techtrade.lab      # @ = diesen Server fragen; flags: qr aa rd ra
 dig @127.0.0.1 shop.techtrade.lab         # CNAME + A in der Antwort
-dig @127.0.0.1 -x 10.10.100.20            # -x = Reverse Lookup (PTR)
 dig @127.0.0.1 www.example.com            # extern über Forwarder: kein aa
 dig @127.0.0.1 +short srv-mon.techtrade.lab   # +short = nur die Antwort
 
+dig @127.0.0.1 -x 10.10.20.13 +short      # -x = Reverse Lookup (PTR); erwartet: srv-web.techtrade.lab.
+dig @127.0.0.1 -x 10.10.30.53 +short      # erwartet: srv-dns.techtrade.lab.
+dig @127.0.0.1 -x 10.10.100.1 +short      # erwartet: r1.techtrade.lab.
+dig @127.0.0.1 -x 10.10.100.20 +short     # erwartet: srv-mon.techtrade.lab.
+# Steht am Ende «...techtrade.lab.30.10.10.in-addr.arpa.», fehlt der Punkt nach dem Namen.
 
---- Server auf SRV-DNS umstellen (Z7) ---------------------------------
 
-Auf SRV-WEB und auf SRV-MON (je einmal):
+--- Server auf SRV-DNS umstellen (Z6) ---------------------------------
+
+Auf SRV-DNS, SRV-WEB und SRV-MON (je einmal):
 sudo nano /etc/netplan/01-dhcp.yaml
-# Zeile nameservers ersetzen durch:
-      nameservers: {addresses: [10.10.30.53], search: [techtrade.lab]}
+# Zeile nameservers ersetzen durch (Werte aus der Adressliste):
+      nameservers: {addresses: [<IP_VON_SRV-DNS>], search: [<INTERNE_DOMAIN>]}
+# addresses = welcher DNS-Server gefragt wird (auf SRV-DNS selbst geht auch 127.0.0.1)
+# search    = Domain, die an kurze Namen angehängt wird (shop -> shop.<INTERNE_DOMAIN>)
 sudo netplan apply                   # Netzkonfiguration übernehmen
-resolvectl status ens3               # «DNS Servers: 10.10.30.53», «DNS Domain: techtrade.lab»
+resolvectl status ens3               # «DNS Servers» und «DNS Domain» zeigen Ihre Werte
 
 Auf SRV-MON:
-getent hosts shop                    # Resolver des Betriebssystems, kurzer Name -> 10.10.20.13
+getent hosts shop; echo "Exit-Code: $?"   # Resolver des Betriebssystems, kurzer Name
+# erwartet: 10.10.20.13 srv-web.techtrade.lab shop.techtrade.lab  und Exit-Code: 0
+# getent gibt bei Misserfolg NICHTS aus - nur der Exit-Code zeigt es: 2 = nicht gefunden
 dig @10.10.30.53 srv-web.techtrade.lab    # direkt bei SRV-DNS: Flag aa
 dig @10.10.30.53 www.example.com          # extern über SRV-DNS
 
@@ -169,16 +193,16 @@ dig @10.10.30.53 www.example.com          # extern über SRV-DNS
 
 
 =====================================================================
- 2. MITSCHNITT LESEN UND STÖRUNGEN EINGRENZEN
+ 2. PACKET CAPTURE LESEN UND STÖRUNGEN EINGRENZEN
 =====================================================================
 
---- Mitschnitt starten ------------------------------------------------
+--- Capture starten ---------------------------------------------------
 
 Auf SRV-DNS:
-sudo rndc flush                      # Cache von BIND leeren
-wireshark &                          # oder Startmenü -> Wireshark; & = Terminal bleibt frei
-# In Wireshark: Schnittstelle ens3 doppelklicken.
-# Mitschnittfilter (Feld «...using this filter» vor dem Start):  port 53
+sudo rndc flush                      # Cache von BIND leeren - sonst ist M2 schon ein Cache-Treffer
+# Wireshark öffnen (Startmenü -> Wireshark).
+# Capture-Filter (Feld «...using this filter» vor dem Start):  port 53
+# Schnittstelle ens3 doppelklicken -> Capture läuft.
 
 --- Anfragen M1 bis M5 ------------------------------------------------
 
@@ -191,16 +215,33 @@ dig @10.10.30.53 srv-web.techtrade.lab AAAA          # M5 (Typ AAAA)
 
 --- Anzeigefilter in Wireshark ----------------------------------------
 
-dns                                   # alle DNS-Pakete
+dns                                   # alle DNS-Pakete (auch SRV-DNS <-> Quad9)
+dns && ip.addr == 10.10.20.13         # nur der Verkehr mit SRV-WEB, beide Richtungen
 dns.flags.response == 0               # nur Anfragen
 dns.flags.response == 1               # nur Antworten
-ip.addr == 10.10.20.13                # Verkehr mit SRV-WEB
 ip.addr == 9.9.9.9 || ip.addr == 149.112.112.112      # Verkehr mit den Forwardern
 dns.qry.name contains "example"       # Anfragen/Antworten zu einem Namen
-dns.flags.rcode == 3                  # NXDOMAIN   (0 NOERROR, 2 SERVFAIL, 5 REFUSED)
-dns.flags.response == 0 && !dns.response_in           # Anfragen ohne Antwort
+dns.flags.rcode == 3                  # NXDOMAIN, in Wireshark «No such name»
+                                      # (0 NOERROR, 2 SERVFAIL, 3 NXDOMAIN, 5 REFUSED)
+dns.flags.response == 0 && not dns.response_in        # Anfragen ohne Antwort
+
 # Paketdetails: «Domain Name System» aufklappen -> Transaction ID, Flags, Queries,
-# Answers (TTL), Authoritative nameservers, [Time: ...] = Antwortzeit, [Response In: ...]
+# Answers (TTL), Authoritative nameservers, [Request In: ...] / [Response In: ...]
+# Antwortzeit: in der ANTWORT unten «[Time: 0.041 seconds]» - Einheit Sekunden (0.041 s = 41 ms)
+# Als Spalte: Rechtsklick auf die Zeile [Time: ...] -> «Als Spalte anwenden»
+# Die Spalte «Time» der Paketliste ist die Zeit seit Capture-Start, ebenfalls in Sekunden.
+# Cache-Fehltreffer erkennen: zwischen Anfrage und Antwort liegen Pakete SRV-DNS <-> Quad9
+# (Filter «dns» statt «ip.addr == 10.10.20.13» verwenden, sonst sind sie ausgeblendet).
+
+--- Schnellüberblick: Statistiken -> DNS ------------------------------
+# Wireshark -> Statistiken -> DNS
+# rcode            = Verteilung der Antworten (No error, No such name, Server failure)
+# Query/Response   = gleich viele Anfragen wie Antworten? Sonst gingen Antworten verloren
+# request-response time (msec) = Antwortzeit Mittelwert / Min / Max
+# Achtung: Ein Capture auf SRV-DNS enthält zwei Strecken (Client <-> SRV-DNS und
+# SRV-DNS <-> Quad9). Nur Client-Sicht: unten im Feld «Anzeigefilter»
+#   ip.addr == 10.10.20.13   eingeben -> «Anwenden».
+# Es gibt nur den Mittelwert, kein p95 - dafür den tshark-Befehl in Auftrag 3 verwenden.
 
 --- S-01 · Neuer Eintrag funktioniert nicht ---------------------------
 
@@ -213,7 +254,7 @@ sudo named-checkzone techtrade.lab /etc/bind/zones/db.techtrade.lab
 sudo rndc reload techtrade.lab       # nur diese Zone neu laden
 
 Auf SRV-WEB:
-getent hosts wiki                    # keine Ausgabe = Name nicht aufgelöst
+getent hosts wiki; echo "Exit-Code: $?"    # keine Adresse und Exit-Code 2 = nicht aufgelöst
 dig @10.10.30.53 wiki.techtrade.lab  # status? Wohin zeigt der CNAME?
 
 # Wireshark (SRV-DNS), Anzeigefilter:   dns.qry.name contains "wiki"
@@ -226,7 +267,7 @@ sudo rndc reload techtrade.lab
 
 Wirkung prüfen auf SRV-WEB:
 sudo resolvectl flush-caches         # lokalen Zwischenspeicher leeren (merkt sich auch «gibt es nicht»)
-getent hosts wiki                    # 10.10.20.13 srv-web.techtrade.lab
+getent hosts wiki; echo "Exit-Code: $?"    # 10.10.20.13 srv-web.techtrade.lab ... und Exit-Code: 0
 
 --- S-02 · Externe Websites nicht erreichbar --------------------------
 
@@ -245,11 +286,12 @@ exit
 
 Auf SRV-DNS:
 sudo rndc flush                      # Cache leeren, sonst kommt die Antwort aus dem Cache
-# Wireshark-Mitschnitt läuft (port 53)
+# Wireshark-Capture läuft (port 53)
 
 Auf SRV-WEB (einen Namen wählen, der im Lab noch nicht vorkam):
 dig @10.10.30.53 www.meteoschweiz.admin.ch     # status? Query time? oder «timed out»?
-getent hosts www.meteoschweiz.admin.ch          # Sicht des Betriebssystems
+getent hosts www.meteoschweiz.admin.ch; echo "Exit-Code: $?"   # Sicht des Betriebssystems
+# dig wartet 5 s und fragt dann nochmals; BIND gibt nach 10 s auf und antwortet SERVFAIL.
 
 # Wireshark (SRV-DNS), Anzeigefilter:
 #   ip.addr == 9.9.9.9 || ip.addr == 149.112.112.112   -> Anfragen ohne Antwort
@@ -283,18 +325,16 @@ statistics-channels {
 
 sudo named-checkconf
 sudo systemctl reload named
-curl -s http://127.0.0.1:8053/ | head -5                  # XML-Statistik von BIND
-curl -s http://localhost:9119/metrics | grep '^bind_up'   # bind_up 1 = Exporter liest BIND
 
 Auf SRV-MON (Firefox):
 # Prometheus  http://localhost:9090  -> Status -> Target health: Job bind UP
-# Grafana     http://localhost:3000  -> Dashboards -> DNS-Dienst
+# Grafana     http://localhost:3000  -> Dashboards -> DNS-Dienst: Panels zeigen Werte
 
 --- Messung (zwei Terminals auf SRV-WEB, eines auf SRV-DNS) ------------
 
-Auf SRV-WEB, Terminal 1 (Mitschnitt, stoppt selbst nach 360 s):
+Auf SRV-WEB, Terminal 1 (Packet Capture, stoppt selbst nach 360 s):
 tshark -i ens3 -f "port 53" -a duration:360 -w ~/last.pcap
-# -i Schnittstelle, -f Mitschnittfilter, -a duration:360 = nach 360 s beenden, -w Datei
+# -i Schnittstelle, -f Capture-Filter, -a duration:360 = nach 360 s beenden, -w Datei
 
 Auf SRV-WEB, Terminal 2 (Last, 5 Minuten):
 date                                 # Startzeit notieren
@@ -307,56 +347,45 @@ date; sudo systemctl restart named                        # nach ca. 1 Minute
 date; sudo systemctl stop prometheus-bind-exporter        # nach ca. 2 Minuten
 date; sudo systemctl start prometheus-bind-exporter       # 2 Minuten später
 
---- Auswertung: Grafana / Prometheus ----------------------------------
+--- Auswertung: Grafana ----------------------------------------------
 
-# Grafana: Dashboard DNS-Dienst, Zeitraum oben rechts auf die Messzeit setzen.
-# Grafana -> Explore -> Datenquelle prometheus, Abfragen. Zeitraum = Messzeit,
-# «Instant» einschalten und den Endzeitpunkt auf das Ende der Last setzen:
-
-sum by (rcode) (increase(bind_response_rcodes_total{rcode=~"NOERROR|NXDOMAIN|SERVFAIL"}[5m]))
-# Antworten je RCODE in den letzten 5 Minuten.
-# increase = Zuwachs im Fenster; erkennt einen Zähler-Reset (Neustart) und rechnet weiter
-
-sum by (result) (increase(bind_responses_total{result=~"Success|Nxrrset"}[5m]))
-# Success = Antwort mit Eintrag, Nxrrset = NODATA (für die Erfolgsquote)
-
-sum(increase(bind_incoming_queries_total[5m]))
-# Anfragen gesamt im Fenster
-
-sum by (rcode) (bind_response_rcodes_total{rcode=~"NOERROR|NXDOMAIN|SERVFAIL"})
-# Rohzähler: Sprung nach unten beim Neustart von BIND
-
-up{job="bind"}
-# 0 während der bind_exporter gestoppt war
+Auf SRV-MON (Firefox), Grafana -> Dashboards -> DNS-Dienst:
+# Zeitraum oben rechts auf das Lastfenster setzen: «Absolute time range»,
+#   From = Startzeit aus date, To = 5 Minuten später -> «Apply time range».
+# «Anfragen gesamt (Zeitraum)»      = Anfragen im gewählten Zeitraum
+# «Antworten je RCODE (Zeitraum)»   = NOERROR / NXDOMAIN / SERVFAIL im gewählten Zeitraum
+#   Beide Panels rechnen mit increase(): ein Zähler-Reset (Neustart) wird erkannt.
+# «Rohzähler»                       = Sprung nach unten beim Neustart von BIND
+# «Exporter erreichbar (up)»        = 0 während der bind_exporter gestoppt war
+# Plausibel? 300 s x 50 Anfragen/s = rund 15 000 Anfragen.
 
 --- Auswertung: tshark ------------------------------------------------
 
 Auf SRV-WEB:
 cd ~
-tshark -r last.pcap -Y "dns.flags.response == 0" | wc -l
+tshark -r last.pcap -Y 'dns.flags.response == 0' | wc -l
 # Anfragen gesamt. -r Datei lesen, -Y Anzeigefilter, wc -l = Zeilen zählen
 
-tshark -r last.pcap -Y "dns.flags.response == 1" -T fields -e dns.flags.rcode | sort | uniq -c
+tshark -r last.pcap -Y 'dns.flags.response == 1' -T fields -e dns.flags.rcode | sort | uniq -c
 # Antworten je RCODE: 0 NOERROR, 2 SERVFAIL, 3 NXDOMAIN
 # -T fields -e Feld = nur dieses Feld ausgeben; sort | uniq -c = gleiche Werte zählen
 
-tshark -r last.pcap -Y "dns.flags.response == 1 && dns.flags.rcode == 0 && dns.count.answers == 0" | wc -l
-# NODATA: NOERROR ohne Eintrag
-
-tshark -2 -r last.pcap -Y "dns.flags.response == 0 && !dns.response_in" | wc -l
+tshark -2 -r last.pcap -Y 'dns.flags.response == 0 && not dns.response_in' | wc -l
 # Anfragen ohne Antwort (Timeouts). -2 = zwei Durchgänge: erst im zweiten Durchgang
 # weiss tshark bei einer Anfrage, ob später eine Antwort kam.
+# Filter immer in einfachen Anführungszeichen ' ' - in " " würde bash ein ! umdeuten.
 
-tshark -r last.pcap -Y "dns.flags.response == 1" -T fields -e dns.time | sort -n > zeiten.txt
-# alle Antwortzeiten in Sekunden, aufsteigend sortiert, in eine Datei
+tshark -r last.pcap -Y 'dns.flags.response == 1' -T fields -e dns.time | sort -n > zeiten.txt
+# alle Antwortzeiten in Sekunden, aufsteigend sortiert, in eine Datei (darum keine Ausgabe)
+wc -l zeiten.txt                     # Anzahl Antwortzeiten in der Datei (rund 15 000)
 
-awk '{s+=$1; a[NR]=$1} END {printf "Anzahl %d  Mittelwert %.1f ms  p50 %.1f ms  p95 %.1f ms  p99 %.1f ms\n", NR, s/NR*1000, a[int(NR*0.50)]*1000, a[int(NR*0.95)]*1000, a[int(NR*0.99)]*1000}' zeiten.txt
+LC_ALL=C awk '{s+=$1; a[NR]=$1} END {printf "Anzahl %d  Mittelwert %.1f ms  p50 %.1f ms  p95 %.1f ms  p99 %.1f ms\n", NR, s/NR*1000, a[int(NR*0.50)]*1000, a[int(NR*0.95)]*1000, a[int(NR*0.99)]*1000}' zeiten.txt
 # awk liest zeiten.txt: Summe für den Mittelwert, Perzentil = Wert an Position NR*0.95 der sortierten Liste
+# LC_ALL=C = Punkt als Dezimaltrennzeichen. Ohne diesen Zusatz liest awk auf der deutsch
+# eingestellten VM «0.000312» als 0 und alle Werte werden 0,0.
 
---- Formeln -----------------------------------------------------------
+--- Formel ------------------------------------------------------------
 # Störungsquote = (SERVFAIL + Anfragen ohne Antwort) ÷ Anfragen gesamt
-# Erfolgsquote  = (NOERROR − NODATA) ÷ (Anfragen gesamt × 0,75)
-#                 0,75 = Anteil der Anfragen, die auflösen sollen (50 % intern + 25 % extern)
 
 
 =====================================================================
@@ -366,21 +395,5 @@ awk '{s+=$1; a[NR]=$1} END {printf "Anzahl %d  Mittelwert %.1f ms  p50 %.1f ms  
 Auf SRV-MON:
 localc ~/lab/bericht_oktober.xlsx &  # oder Dateimanager -> lab -> Doppelklick
 # Speichern: Datei -> Speichern unter -> Format beibehalten oder .ods
-
---- Nützliche Funktionen (englische / deutsche Oberfläche) ------------
-# SUM / SUMME                 =SUM(C5:C35)
-# AVERAGE / MITTELWERT        =AVERAGE(D5:D12)
-# MEDIAN / MEDIAN             =MEDIAN(I5:I35)
-# COUNTIF / ZÄHLENWENN        =COUNTIF(E4:E21;"Shop-Anwendung")
-# AVERAGEIF / MITTELWERTWENN  =AVERAGEIF(B5:B35;"Mo";C5:C35)
-# MAX / MAX                   =MAX(H5:H35)
-# Dauer in Stunden aus zwei Zeitpunkten:   =(C4-B4)*24
-# Prozent: Zelle markieren -> Format -> Zahlen -> Prozent
-# Hinweis: Leere Zellen zählen bei AVERAGE und MEDIAN nicht mit, negative Werte schon.
-
---- Pareto-Diagramm ---------------------------------------------------
-# 1. Kategorien und Anzahl in eine Tabelle (COUNTIF), absteigend sortieren (Daten -> Sortieren)
-# 2. Spalte Anteil = Anzahl ÷ Summe, Spalte kumuliert = Summe der Anteile bis zu dieser Zeile
-# 3. Kategorie, Anzahl und kumuliert markieren -> Einfügen -> Diagramm -> «Säule und Linie»
-# 4. kumuliert als Linie auf die zweite Y-Achse (Datenreihe -> Rechtsklick -> Datenreihe formatieren)
-# 5. Titel und Achsenbeschriftungen setzen
+# Alle Werte sind bereits berechnet - Formeln müssen Sie keine schreiben.
+# Gelbe Felder ausfüllen. Taschenrechner und KI sind erlaubt; jedes Ergebnis begründen.

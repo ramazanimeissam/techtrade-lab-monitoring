@@ -18,7 +18,7 @@ U=gns3
 log(){ echo; echo "=== $* ==="; }
 
 wireshark_install(){
-  log "Wireshark und tshark (Mitschnitt ohne sudo für $U)"
+  log "Wireshark und tshark (Packet Capture ohne sudo für $U)"
   echo "wireshark-common wireshark-common/install-setuid boolean true" | debconf-set-selections
   $APT install wireshark tshark tcpdump
   dpkg-reconfigure -f noninteractive wireshark-common
@@ -130,6 +130,14 @@ def stat(pid, title, expr, x, desc):
                             "mappings": [{"type": "value", "options": {"0": {"text": "NEIN"}, "1": {"text": "JA"}}}],
                             "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": None}, {"color": "green", "value": 1}]}},
                             "overrides": []}}
+def total(pid, title, expr, legend, x, w, desc):
+    # Summe über den oben rechts gewählten Zeitraum ($__range); increase() erkennt Zähler-Resets
+    return {"id": pid, "type": "stat", "title": title, "description": desc, "datasource": P,
+            "gridPos": {"x": x, "y": 16, "w": w, "h": 6},
+            "targets": [{"refId": "A", "datasource": P, "expr": expr, "legendFormat": legend, "instant": True}],
+            "options": {"colorMode": "none", "graphMode": "none", "textMode": "value_and_name",
+                        "reduceOptions": {"calcs": ["lastNotNull"]}},
+            "fieldConfig": {"defaults": {"noValue": "keine Daten", "decimals": 0, "unit": "short"}, "overrides": []}}
 def ts(pid, title, targets, x, y, w, unit, desc):
     return {"id": pid, "type": "timeseries", "title": title, "description": desc, "datasource": P,
             "gridPos": {"x": x, "y": y, "w": w, "h": 8},
@@ -146,9 +154,11 @@ panels = [
   ts(5, "Rohzähler Antworten nach RCODE seit Start von BIND",
      [('sum by (rcode) (bind_response_rcodes_total{rcode=~"NOERROR|NXDOMAIN|SERVFAIL|REFUSED"})', "{{rcode}}")], 12, 8, 12, "short",
      "Kumulierte Zähler. Fallen nach einem Neustart von BIND auf 0."),
-  ts(7, "Antworten pro Sekunde nach Ergebnis",
-     [('sum by (result) (rate(bind_responses_total{result=~"Success|Nxrrset|NXDOMAIN|SERVFAIL"}[1m]))', "{{result}}")], 0, 16, 12, "reqps",
-     "Success = Antwort mit Eintrag, Nxrrset = Name existiert, aber nicht mit diesem Typ (NODATA)."),
+  total(7, "Anfragen gesamt (Zeitraum)", 'sum(increase(bind_incoming_queries_total[$__range]))', "Anfragen", 0, 4,
+     "Anfragen im oben rechts gewählten Zeitraum. Zeitraum auf das Lastfenster setzen."),
+  total(8, "Antworten je RCODE (Zeitraum)",
+     'sum by (rcode) (increase(bind_response_rcodes_total{rcode=~"NOERROR|NXDOMAIN|SERVFAIL"}[$__range]))', "{{rcode}}", 4, 8,
+     "Antworten je RCODE im oben rechts gewählten Zeitraum. increase() rechnet über einen Neustart von BIND hinweg."),
   ts(6, "Upstream: Rundlaufzeit der Anfragen an die Forwarder (p95)",
      [('histogram_quantile(0.95, sum by (le) (rate(bind_resolver_query_duration_seconds_bucket{view="_default"}[1m])))', "p95 Upstream")], 12, 16, 12, "s",
      "Zeit, bis die Forwarder BIND antworten. Das ist NICHT die Antwortzeit, die ein Client erlebt."),
@@ -167,16 +177,18 @@ PYEOF
 fi
 
 log "Cheatsheet und Prüfskript"
-if wget -q "$KIT_URL/l16-cheatsheet.txt" -O /home/$U/lab-cheatsheet.txt; then
+mkdir -p /home/$U/Desktop && chown $U:$U /home/$U/Desktop
+rm -f /home/$U/lab-cheatsheet.txt                      # alter Ablageort (vor 01.11.)
+if wget -q "$KIT_URL/l16-cheatsheet.txt" -O /home/$U/Desktop/lab-cheatsheet.txt; then
   echo "Cheatsheet L16 geladen"
 else
   echo "HINWEIS: l16-cheatsheet.txt noch nicht im Repo - vor dem Einfrieren nachladen"
 fi
-chown $U:$U /home/$U/lab-cheatsheet.txt 2>/dev/null || true
+chown $U:$U /home/$U/Desktop/lab-cheatsheet.txt 2>/dev/null || true
 mkdir -p /home/$U/lab && chown $U:$U /home/$U/lab
 wget -q "$KIT_URL/l16-verify.sh" -O /home/$U/lab/l16-verify.sh 2>/dev/null && chown $U:$U /home/$U/lab/l16-verify.sh || true
 
 log "FERTIG L16 ($ROLE)"
 echo "Prüfen:  bash ~/lab/l16-verify.sh"
-[[ $ROLE != mon ]] && echo "Neu anmelden oder neu starten, damit gns3 ohne sudo mitschneiden darf."
+[[ $ROLE != mon ]] && echo "Neu anmelden oder neu starten, damit gns3 ohne sudo Pakete aufzeichnen darf."
 exit 0

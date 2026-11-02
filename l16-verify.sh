@@ -8,7 +8,7 @@ chk(){ local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"
 H=$(hostname)
 
 common(){
-  chk "Cheatsheet vorhanden"                    test -s ~/lab-cheatsheet.txt
+  chk "Cheatsheet vorhanden"                    test -s ~/Desktop/lab-cheatsheet.txt
   chk "Internet erreichbar (1.1.1.1)"          ping -c1 -W2 1.1.1.1
 }
 
@@ -19,6 +19,7 @@ SRV-DNS)
   chk "Gateway R1 10.10.30.1 erreichbar"        ping -c1 -W2 10.10.30.1
   chk "SRV-WEB erreichbar"                     ping -c1 -W2 10.10.20.13
   chk "SRV-MON erreichbar"                     ping -c1 -W2 10.10.100.20
+  chk "Resolver 1.1.1.1 (Ausgangszustand)"     bash -c "resolvectl dns ens3 | grep -q 1.1.1.1"
   chk "BIND (named) läuft"                     systemctl is-active named
   chk "BIND-Konfiguration gültig"              sudo named-checkconf
   chk "keine eigenen Zonen (named.conf.local leer)" bash -c "! grep -v '^//' /etc/bind/named.conf.local | grep -q zone"
@@ -31,7 +32,7 @@ SRV-DNS)
   chk "Wireshark installiert"                  command -v wireshark
   chk "tshark installiert"                     command -v tshark
   chk "gns3 in Gruppe wireshark"               bash -c 'id -nG gns3 | grep -qw wireshark'
-  chk "dumpcap darf mitschneiden (Capabilities)" bash -c 'getcap /usr/bin/dumpcap | grep -q cap_net_raw'
+  chk "dumpcap darf Pakete aufzeichnen (Capabilities)" bash -c 'getcap /usr/bin/dumpcap | grep -q cap_net_raw'
   chk "rndc funktioniert"                      sudo rndc status
   echo "Versionen: $(named -v)  |  $(prometheus-bind-exporter --version 2>&1 | head -1)  |  $(tshark -v 2>/dev/null | head -1)"
   common ;;
