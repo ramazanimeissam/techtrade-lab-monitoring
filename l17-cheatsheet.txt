@@ -1,0 +1,201 @@
+=====================================================================
+PLAN-200 · Lektion 17 · Lab-Cheatsheet
+Threat Intelligence, Schwachstellen beurteilen, Angriffe erkennen
+=====================================================================
+Anmeldung: Server gns3 / Gns3456 · KALI kali / Gns3456 · R1 vyos / Gns3456
+Jeder Block nennt das System, auf dem er läuft.
+
+
+---------------------------------------------------------------------
+1. BESTAND ERFASSEN
+---------------------------------------------------------------------
+
+Auf SRV-MON:
+cd ~/ansible
+cat inventory.yml                     # welche Server verwaltet Ansible?
+ansible linux -m ansible.builtin.ping -o
+# -o = eine Zeile pro Server
+
+# Installierte Pakete aller Server erfassen (package_facts)
+# und die Einträge für openssh-server herausfiltern
+ansible linux -m ansible.builtin.package_facts | grep -A 6 '"openssh-server"'
+# grep -A 6 = Treffer plus 6 Folgezeilen (darin steht "version")
+
+# Kürzer: nur die Version eines Pakets abfragen
+ansible linux -m ansible.builtin.command -a "dpkg-query -W openssh-server"
+# dpkg-query -W = Paketname und installierte Version
+
+Auf SRV-WEB:
+sudo docker ps --format 'table {{.Names}}\t{{.Image}}'
+# welche Images verwendet der Shop-Stack?
+
+# Images mit Trivy prüfen (Datenbank ist vorgeladen, kein Download)
+sudo trivy image --skip-db-update --scanners vuln nginx:1.30.5-alpine | head -20
+# --skip-db-update = Datenbank nicht aktualisieren (Stand der Vorlage)
+# --scanners vuln  = nur Schwachstellen, keine Secrets/Konfiguration
+# Die Zeile "Total: ..." zeigt die Anzahl je Schweregrad
+sudo trivy image --skip-db-update --scanners vuln postgres:16.15-alpine | head -20
+sudo trivy image --skip-db-update --scanners vuln techtrade/shop:1.4 | head -20
+
+# Nur die schweren Befunde eines Images
+sudo trivy image --skip-db-update --scanners vuln --severity HIGH,CRITICAL nginx:1.30.5-alpine
+
+Auf KALI:
+nmap -sV 10.10.20.13
+nmap -sV 10.10.100.20
+# -sV = Versionserkennung: Nmap fragt die Dienste nach ihrer Kennung
+# Spalten: PORT, STATE (open/closed/filtered), SERVICE, VERSION
+
+Auf R1:
+show version
+show configuration commands | match service
+# zeigt alle aktiven Dienste auf R1 (z. B. ssh, https)
+
+
+---------------------------------------------------------------------
+2. SICHERHEITSMELDUNGEN BEURTEILEN
+---------------------------------------------------------------------
+
+Auf SRV-WEB (A-01: genaue Paketversion vergleichen):
+dpkg-query -W openssh-server
+apt-cache policy openssh-server
+# Installed  = installierte Version
+# Candidate  = neueste verfügbare Version
+apt changelog openssh-server | grep -m 3 -B 2 CVE-2024-6387
+# zeigt, in welcher Paketversion Ubuntu die Lücke behoben hat
+# (Ubuntu übernimmt Korrekturen in ältere Versionen = Backport)
+
+Auf SRV-WEB (A-02, A-03: Versionen im Shop-Stack):
+sudo docker exec shop-proxy-1 nginx -v
+sudo docker exec shop-db-1 postgres --version
+sudo docker port shop-proxy-1          # welche Ports sind nach aussen offen?
+sudo docker port shop-db-1             # leer = nicht nach aussen veröffentlicht
+
+Auf R1 (A-05):
+show configuration commands | match https
+# keine Ausgabe = Dienst "service https" ist nicht konfiguriert
+
+
+---------------------------------------------------------------------
+3. ANGRIFFE ERKENNEN
+---------------------------------------------------------------------
+
+Auf SRV-WEB (HOME_NET setzen):
+sudo nano /etc/suricata/suricata.yaml
+# Zeile HOME_NET im Abschnitt vars: address-groups: anpassen auf
+#   HOME_NET: "[10.10.0.0/16]"
+# EXTERNAL_NET: "!$HOME_NET" bleibt (alles ausser HOME_NET)
+
+sudo suricata -T -c /etc/suricata/suricata.yaml
+# -T = nur Konfiguration testen, Suricata nicht starten
+# erwartet: "Configuration provided was successfully loaded"
+
+Auf SRV-WEB (Regeln laden):
+sudo suricata-update
+# lädt den Regelsatz Emerging Threats Open nach /var/lib/suricata/rules/
+# am Ende: Anzahl Regeln ("Loaded ... rules", "Writing rules ...")
+sudo systemctl restart suricata
+sudo systemctl status suricata --no-pager
+sudo tail -n 5 /var/log/suricata/suricata.log
+# Zeile "... rules successfully loaded" zeigt die Anzahl geladener Regeln
+
+Auf SRV-WEB (Alarme live verfolgen, zweites Terminal offen lassen):
+sudo tail -f /var/log/suricata/eve.json | jq -c 'select(.event_type=="alert") | {zeit:.timestamp, src:.src_ip, dst:.dest_ip, port:.dest_port, sig:.alert.signature}'
+# tail -f = neue Zeilen laufend anzeigen
+# jq select(...) = nur Ereignisse vom Typ alert
+# {...} = nur Zeit, Quelle, Ziel, Zielport und Signatur ausgeben
+# Beenden mit Ctrl+C
+
+Auf KALI (autorisierter Test):
+nmap -sV 10.10.20.13
+
+# Mehrere fehlgeschlagene SSH-Anmeldungen (falsches Passwort, Benutzer admin)
+for i in 1 2 3 4 5 6 7 8; do sshpass -p falsch ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no admin@10.10.20.13 exit; done
+# sshpass -p = Passwort übergeben (hier absichtlich falsch)
+# die Schleife wiederholt die Anmeldung 8-mal
+
+curl -k -s -o /dev/null -w '%{http_code}\n' https://10.10.20.13
+# -k = selbstsigniertes Zertifikat akzeptieren, -w = nur HTTP-Status zeigen
+
+Auf SRV-WEB (Auswertung):
+sudo jq -c 'select(.event_type=="alert") | {zeit:.timestamp, src:.src_ip, dst:.dest_ip, sig:.alert.signature}' /var/log/suricata/eve.json
+# Signaturen zählen
+sudo jq -r 'select(.event_type=="alert") | .alert.signature' /var/log/suricata/eve.json | sort | uniq -c | sort -rn
+# Was hat Suricata vom HTTPS-Aufruf gesehen? (Metadaten, kein Inhalt)
+sudo jq -c 'select(.event_type=="tls") | {src:.src_ip, sni:.tls.sni, version:.tls.version}' /var/log/suricata/eve.json | tail -3
+
+Auf SRV-WEB (Systemlog der SSH-Anmeldungen):
+sudo journalctl -u ssh --since "15 min ago" | grep -i -E "failed|invalid"
+# -u ssh = nur Meldungen des SSH-Dienstes
+
+
+---------------------------------------------------------------------
+4. MASSNAHMEN UMSETZEN UND NACHWEISEN
+---------------------------------------------------------------------
+
+Zustand vorher festhalten:
+Auf SRV-MON:
+cd ~/ansible
+ansible srv-web -m ansible.builtin.command -a "dpkg-query -W openssh-server"
+Auf KALI:
+nmap -sV -p 22,443 10.10.20.13
+# -p = nur diese Ports prüfen
+
+M1 Behebung - OpenSSH mit Ansible aktualisieren
+Auf SRV-MON:
+cd ~/ansible
+ansible srv-web -b -m ansible.builtin.apt -a "name=openssh-server state=latest update_cache=yes cache_valid_time=3600"
+# -b = become (als root ausführen)
+# state=latest = auf die neueste verfügbare Version bringen (nur dieses Paket
+#   und die Pakete, von denen es abhängt)
+# update_cache=yes = Paketlisten vorher aktualisieren, cache_valid_time=3600
+#   = nicht erneut, wenn die Listen jünger als 1 Stunde sind
+# erwartet: CHANGED
+# denselben Befehl ein zweites Mal ausführen -> erwartet: SUCCESS, "changed": false
+ansible srv-web -m ansible.builtin.command -a "dpkg-query -W openssh-server"
+
+M2 Erkennung - eigene Suricata-Regel
+Auf SRV-WEB:
+sudo nano /etc/suricata/rules/local.rules
+# Aufbau einer Regel (Platzhalter in <> ersetzen, eine Zeile):
+#   alert <protokoll> <quelle> any -> <ziel> any (msg:"<Text mit Verweis auf die Meldung>"; sid:<nummer>; rev:1;)
+# <protokoll> ip = jeder IP-Verkehr
+# <ziel> $HOME_NET = die Netze aus HOME_NET
+# sid = Signatur-ID; eigene Regeln ab 1000000
+sudo suricata -T -c /etc/suricata/suricata.yaml
+sudo systemctl restart suricata
+Auf KALI (Regel auslösen):
+curl -k -s -o /dev/null -w '%{http_code}\n' https://10.10.20.13
+Auf SRV-WEB:
+sudo jq -c 'select(.event_type=="alert" and .alert.signature_id >= 1000000) | {zeit:.timestamp, src:.src_ip, sig:.alert.signature}' /var/log/suricata/eve.json
+
+M3 Verhinderung - Firewall auf R1
+Auf R1:
+configure
+# Regeln im Weiterleitungsfilter (Verkehr, der durch R1 hindurch geht).
+# Platzhalter in <> ersetzen. Reihenfolge: zuerst erlauben, dann verwerfen.
+set firewall ipv4 forward filter rule 20 action accept
+set firewall ipv4 forward filter rule 20 protocol tcp
+set firewall ipv4 forward filter rule 20 destination port <port>
+set firewall ipv4 forward filter rule 20 source address <netz>
+set firewall ipv4 forward filter rule 30 action drop
+set firewall ipv4 forward filter rule 30 protocol tcp
+set firewall ipv4 forward filter rule 30 destination port <port>
+compare
+commit
+save
+exit
+show firewall ipv4 forward filter
+# zeigt die Regeln mit Zählern (Pakete, Bytes) je Regel
+
+Nachweis M3:
+Auf KALI:
+nmap -sV -p 22,443 10.10.20.13
+# erwartet: 22 filtered, 443 open
+Auf SRV-MON:
+cd ~/ansible
+ansible srv-web -m ansible.builtin.ping -o
+# erwartet: SUCCESS (Verwaltung aus dem Management-Netz geht weiter)
+Auf R1:
+show firewall ipv4 forward filter
+# Zähler von Regel 30 sind gestiegen = Pakete von KALI wurden verworfen
