@@ -1,176 +1,185 @@
 =====================================================================
 PLAN-200 · Lektion 17 · Lab-Cheatsheet
-Threat Intelligence, Schwachstellen beurteilen, Angriffe erkennen
+Red Team gegen Blue Team: angreifen, beurteilen, erkennen, schützen
 =====================================================================
 Anmeldung: Server und KALI gns3 / Gns3456 · R1 vyos / Gns3456
 Jeder Block nennt das System, auf dem er läuft.
 
 
 ---------------------------------------------------------------------
-1. BESTAND ERFASSEN
+RUNDE 1 · RED TEAM: AUFKLÄRUNG
 ---------------------------------------------------------------------
 
-Ziel: herausfinden, was läuft und was erreichbar ist - ohne vorgegebene Liste.
-Jedes Werkzeug zeigt nur einen Ausschnitt. Erst zusammen ergeben sie das Inventar.
-
-Schritt 1 - Was ist von aussen erreichbar?
+Was ist von aussen erreichbar?
 Auf KALI:
 nmap -sV 10.10.20.13
 nmap -sV 10.10.100.20
 # -sV = Versionserkennung: Nmap fragt die Dienste nach ihrer Kennung
 # Spalten: PORT, STATE (open = erreichbar), SERVICE, VERSION
-# Nmap sieht nur, was über das Netz antwortet - nichts, was nur lokal läuft
+# Ohne weitere Angabe prüft Nmap nur die 1000 häufigsten Ports.
+# Meldung "Unable to determine any DNS servers" ist harmlos (KALI braucht kein DNS)
 
-Schritt 2 - Welche Dienste laufen auf dem Server, auf welchen Ports?
-Auf SRV-WEB und auf SRV-MON:
+Was verrät der Webserver über sich?
+Auf KALI:
+curl -I http://10.10.20.13
+curl -k -I https://10.10.20.13
+# -I = nur die Kopfzeilen der Antwort anzeigen (Header)
+# -k = selbstsigniertes Zertifikat akzeptieren
+# Zeile "Server:" = Software und Version des Webservers
+
+
+---------------------------------------------------------------------
+RUNDE 2 · BLUE TEAM: LAGE BEURTEILEN
+---------------------------------------------------------------------
+
+Welche Programme stehen hinter den erreichbaren Ports?
+Auf SRV-WEB:
 sudo ss -tlnp
 # ss = Netzwerkverbindungen anzeigen
 # -t = TCP, -l = nur wartende Ports (listen), -n = Zahlen statt Namen,
-# -p = zugehöriges Programm
-# Spalte "Local Address:Port": 0.0.0.0 oder * = auf allen Adressen erreichbar,
-# 127.0.0.1 = nur lokal
-systemctl list-units --type=service --state=running --no-pager
-# alle laufenden Dienste des Betriebssystems
+# -p = zugehöriges Programm (Spalte Process)
+# Spalte "Local Address:Port":
+#   0.0.0.0:<port>, *:<port>, [::]:<port> = auf allen Adressen -> von anderen Systemen erreichbar
+#   127.0.0.x:<port>, [::1]:<port>        = nur lokal erreichbar
+# docker-proxy = Port eines Containers, den Docker nach aussen veröffentlicht
 
-Schritt 3 - Laufen Container? Aus welchen Images?
-Auf SRV-WEB und auf SRV-MON:
-sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
-# Name, Image (mit Version im Tag) und veröffentlichte Ports je Container
+Welche Container laufen?
+Auf SRV-WEB:
+sudo docker ps
+# Spalte IMAGE: Image und Version (Tag nach dem Doppelpunkt)
+# Spalte PORTS: veröffentlichte Ports, z. B. 0.0.0.0:443->443/tcp
+# Spalte NAMES: Name des Containers
 # Software in Containern kennt die Paketverwaltung des Servers (apt) nicht
 
-Schritt 4 - Betriebssystem-Pakete von SRV-WEB auf Schwachstellen prüfen
+Pakete von SRV-WEB auf Schwachstellen prüfen
 Auf SRV-WEB:
-sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --skip-dirs /proc,/sys,/var/lib/docker / | head -20
+sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --severity HIGH,CRITICAL --ignore-unfixed / | grep Total
 # rootfs /          = das Dateisystem des Servers prüfen
-# --skip-db-update  = Datenbank nicht aktualisieren (Stand der Vorlage)
+# --skip-db-update  = Datenbank nicht herunterladen: im Lab wegen der langsamen
+#                     Internetverbindung (Datenbank ca. 60-80 MB). Im Betrieb immer
+#                     die aktuelle Datenbank verwenden (Standard ohne diese Option).
 # --scanners vuln   = nur Schwachstellen
-# --pkg-types os    = nur Pakete des Betriebssystems (apt)
-# --skip-dirs       = Systemordner und Container-Daten auslassen
-# Die Zeile "Total: ..." zeigt die Anzahl je Schweregrad
-sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --skip-dirs /proc,/sys,/var/lib/docker --severity CRITICAL,HIGH /
-# nur kritische und hohe Befunde, mit Paket, CVE, installierter und behobener Version
+# --pkg-types os    = nur Pakete des Betriebssystems (apt), keine Container-Daten
+# --severity        = nur hohe und kritische Befunde
+# --ignore-unfixed  = nur Befunde, für die es bereits eine korrigierte Version gibt
+# | grep Total      = nur die Zusammenfassung: Anzahl je Schweregrad
+# Die Liste ist lang (grösster Teil: Linux-Kernel). Niemand liest sie ganz.
+# Man prüft gezielt die Pakete der Dienste, die von aussen erreichbar sind:
+#   Port 22    sshd            -> Paket openssh
+#   Port 9100  prometheus-node -> Paket prometheus-node-exporter
+#   Port 10050 zabbix_agent2   -> Paket zabbix-agent2
+#   Port 5201  iperf3          -> Paket iperf3
+sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --ignore-unfixed / | grep -i -A 2 openssh
+sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --ignore-unfixed / | grep -i -A 2 node-exporter
+sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --ignore-unfixed / | grep -i -A 2 zabbix
+sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --ignore-unfixed / | grep -i -A 2 iperf3
+# grep -i -A 2 <name> = Zeilen mit dem Namen plus 2 Folgezeilen; keine Ausgabe = kein Befund
+# Spalten: Paket, CVE, Schweregrad, installierte Version, korrigierte Version, Titel
+# Ports 80 und 443 (nginx) laufen im Container -> Prüfung der Images
 
-Schritt 5 - Images des Shop-Stacks prüfen
-Auf SRV-WEB (Image-Namen aus Schritt 3):
-sudo trivy image --skip-db-update --scanners vuln nginx:1.30.5-alpine | head -20
-sudo trivy image --skip-db-update --scanners vuln postgres:16.15-alpine | head -20
-sudo trivy image --skip-db-update --scanners vuln techtrade/shop:1.4 | head -20
+Images des Shop-Stacks prüfen
+Auf SRV-WEB:
+sudo trivy image --skip-db-update --scanners vuln nginx:1.30.5-alpine | grep Total
+sudo trivy image --skip-db-update --scanners vuln postgres:16.15-alpine | grep Total
+sudo trivy image --skip-db-update --scanners vuln techtrade/shop:1.4 | grep Total
+# nginx ist von aussen erreichbar (Ports 80, 443) -> gezielt prüfen:
+sudo trivy image --skip-db-update --scanners vuln --ignore-unfixed nginx:1.30.5-alpine | grep -i -A 2 nginx
+# keine Ausgabe = Trivy kennt keinen Befund zu nginx selbst
+# (Befunde zu anderen Paketen im Image können trotzdem bestehen)
+# Details eines Images seitenweise ansehen (q = beenden):
+sudo trivy image --skip-db-update --scanners vuln --severity HIGH,CRITICAL nginx:1.30.5-alpine | less
 
-Schritt 6 - R1
+Meldungen abgleichen: Versionen gezielt nachschlagen
+Auf SRV-WEB:
+apt policy openssh-server
+# Installed = installierte Version, Candidate = neueste verfügbare Version
+apt changelog openssh-server | grep -m 1 -B 2 CVE-2024-6387
+# zeigt, in welcher Paketversion Ubuntu die Lücke behoben hat
+# (Ubuntu übernimmt Korrekturen in ältere Versionen = Backport)
+sudo docker exec shop-proxy-1 nginx -v
+sudo docker exec shop-db-1 postgres --version
+# Version der Software im jeweiligen Container
+sudo docker port shop-db-1
+# keine Ausgabe = Datenbank ist nicht nach aussen veröffentlicht
+
 Auf R1:
 show version
 show configuration commands | match service
-# zeigt alle aktiven Dienste auf R1 (z. B. ssh, https)
+# alle aktiven Dienste auf R1 (z. B. ssh, https)
 
-Einzelne Version gezielt nachschlagen (bei Bedarf):
+
+---------------------------------------------------------------------
+RUNDE 3 · BLUE TEAM GEGEN RED TEAM: ANGRIFFE ERKENNEN
+---------------------------------------------------------------------
+
+Blue Team: HOME_NET setzen
 Auf SRV-WEB:
-apt policy openssh-server
-# Installed = installierte Version, (none) = nicht installiert
-# Candidate = neueste verfügbare Version
-sudo docker exec shop-proxy-1 nginx -v
-# Version von nginx im Container shop-proxy-1
-
----------------------------------------------------------------------
-2. SICHERHEITSMELDUNGEN BEURTEILEN
----------------------------------------------------------------------
-
-Auf SRV-WEB (A-01: genaue Paketversion vergleichen):
-dpkg-query -W openssh-server
-apt-cache policy openssh-server
-# Installed  = installierte Version
-# Candidate  = neueste verfügbare Version
-apt changelog openssh-server | grep -m 3 -B 2 CVE-2024-6387
-# zeigt, in welcher Paketversion Ubuntu die Lücke behoben hat
-# (Ubuntu übernimmt Korrekturen in ältere Versionen = Backport)
-
-Auf SRV-WEB (A-02, A-03: Versionen im Shop-Stack):
-sudo docker exec shop-proxy-1 nginx -v
-sudo docker exec shop-db-1 postgres --version
-sudo docker port shop-proxy-1          # welche Ports sind nach aussen offen?
-sudo docker port shop-db-1             # leer = nicht nach aussen veröffentlicht
-
-Auf R1 (A-05):
-show configuration commands | match https
-# keine Ausgabe = Dienst "service https" ist nicht konfiguriert
-
-
----------------------------------------------------------------------
-3. ANGRIFFE ERKENNEN
----------------------------------------------------------------------
-
-Auf SRV-WEB (HOME_NET setzen):
 sudo nano /etc/suricata/suricata.yaml
 # Zeile HOME_NET im Abschnitt vars: address-groups: anpassen auf
 #   HOME_NET: "[10.10.0.0/16]"
 # EXTERNAL_NET: "!$HOME_NET" bleibt (alles ausser HOME_NET)
-
 sudo suricata -T -c /etc/suricata/suricata.yaml
 # -T = nur Konfiguration testen, Suricata nicht starten
 # erwartet: "Configuration provided was successfully loaded"
 
-Auf SRV-WEB (Regeln laden):
+Blue Team: Regeln laden
+Auf SRV-WEB:
 sudo suricata-update
 # lädt den Regelsatz Emerging Threats Open nach /var/lib/suricata/rules/
-# am Ende: Anzahl Regeln ("Loaded ... rules", "Writing rules ...")
 sudo systemctl restart suricata
 sudo systemctl status suricata --no-pager
 sudo tail -n 5 /var/log/suricata/suricata.log
 # Zeile "... rules successfully loaded" zeigt die Anzahl geladener Regeln
 
-Auf SRV-WEB (Alarme live verfolgen, zweites Terminal offen lassen):
-sudo tail -f /var/log/suricata/eve.json | jq -c 'select(.event_type=="alert") | {zeit:.timestamp, src:.src_ip, dst:.dest_ip, port:.dest_port, sig:.alert.signature}'
-# tail -f = neue Zeilen laufend anzeigen
-# jq select(...) = nur Ereignisse vom Typ alert
-# {...} = nur Zeit, Quelle, Ziel, Zielport und Signatur ausgeben
-# Beenden mit Ctrl+C
+Blue Team: Alarme live mitlesen (zweites Terminal offen lassen)
+Auf SRV-WEB:
+sudo tail -f /var/log/suricata/fast.log
+# fast.log = eine Zeile pro Alarm: Zeit, Signatur, Priorität, Protokoll, Quelle -> Ziel
+# tail -f = neue Zeilen laufend anzeigen, beenden mit Ctrl+C
 
-Auf KALI (autorisierter Test):
+Red Team: Angriff
+Auf KALI:
 nmap -sV 10.10.20.13
 
-# Mehrere fehlgeschlagene SSH-Anmeldungen (falsches Passwort, Benutzer admin)
 for i in 1 2 3 4 5 6 7 8; do sshpass -p falsch ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no admin@10.10.20.13 exit; done
+# 8 Anmeldeversuche mit falschem Passwort (Benutzer admin)
 # sshpass -p = Passwort übergeben (hier absichtlich falsch)
-# die Schleife wiederholt die Anmeldung 8-mal
 
-curl -k -s -o /dev/null -w '%{http_code}\n' https://10.10.20.13
-# -k = selbstsigniertes Zertifikat akzeptieren, -w = nur HTTP-Status zeigen
+curl -k -I https://10.10.20.13
 
-Auf SRV-WEB (Auswertung):
-sudo jq -c 'select(.event_type=="alert") | {zeit:.timestamp, src:.src_ip, dst:.dest_ip, sig:.alert.signature}' /var/log/suricata/eve.json
-# Signaturen zählen
-sudo jq -r 'select(.event_type=="alert") | .alert.signature' /var/log/suricata/eve.json | sort | uniq -c | sort -rn
-# Was hat Suricata vom HTTPS-Aufruf gesehen? (Metadaten, kein Inhalt)
-sudo jq -c 'select(.event_type=="tls") | {src:.src_ip, sni:.tls.sni, version:.tls.version}' /var/log/suricata/eve.json | tail -3
+Blue Team: Auswertung
+Auf SRV-WEB:
+sudo cat /var/log/suricata/fast.log
+# alle Alarme seit dem Start
+sudo grep 203.0.113.66 /var/log/suricata/fast.log
+# nur Alarme mit der Adresse von KALI
+sudo jq 'select(.event_type=="alert")' /var/log/suricata/eve.json | less
+# eve.json = dieselben Alarme mit allen Details (JSON), q = beenden
+sudo jq 'select(.event_type=="tls")' /var/log/suricata/eve.json | less
+# Was hat Suricata vom HTTPS-Aufruf gesehen? (Servername, Version - kein Inhalt)
 
-Auf SRV-WEB (Systemlog der SSH-Anmeldungen):
+Blue Team: Systemlog der SSH-Anmeldungen
+Auf SRV-WEB:
 sudo journalctl -u ssh --since "15 min ago" | grep -i -E "failed|invalid"
 # -u ssh = nur Meldungen des SSH-Dienstes
+# grep -E "failed|invalid" = Zeilen mit failed oder invalid
 
 
 ---------------------------------------------------------------------
-4. MASSNAHMEN UMSETZEN UND NACHWEISEN
+RUNDE 4 · BLUE TEAM HÄRTET, RED TEAM GREIFT ERNEUT AN
 ---------------------------------------------------------------------
-
-Zustand vorher festhalten:
-Auf SRV-WEB:
-dpkg-query -W openssh-server
-Auf KALI:
-nmap -sV -p 22,443 10.10.20.13
-# -p = nur diese Ports prüfen
 
 M1 Behebung - nur OpenSSH aktualisieren
 Auf SRV-WEB:
+apt policy openssh-server
+# Zustand vorher festhalten
 sudo apt update
 sudo apt install --only-upgrade openssh-server
-# --only-upgrade = nur aktualisieren, falls installiert; nichts neu installieren
+# --only-upgrade = nur aktualisieren, nichts neu installieren
 # apt aktualisiert openssh-client und openssh-sftp-server mit,
 # weil openssh-server genau dieselbe Version davon verlangt
-dpkg-query -W openssh-server
-apt changelog openssh-server | grep -m 1 -B 2 CVE-2024-6387
-# die installierte Version muss mindestens die behobene Version sein
-Auf KALI:
-nmap -sV -p 22 10.10.20.13
-# die gemeldete Version endet jetzt mit der neuen Paketrevision
+apt policy openssh-server
+# Installed muss mindestens der Version aus Meldung A-01 entsprechen
 
 M2 Erkennung - eigene Suricata-Regel
 Auf SRV-WEB:
@@ -183,9 +192,10 @@ sudo nano /etc/suricata/rules/local.rules
 sudo suricata -T -c /etc/suricata/suricata.yaml
 sudo systemctl restart suricata
 Auf KALI (Regel auslösen):
-curl -k -s -o /dev/null -w '%{http_code}\n' https://10.10.20.13
+curl -k -I https://10.10.20.13
 Auf SRV-WEB:
-sudo jq -c 'select(.event_type=="alert" and .alert.signature_id >= 1000000) | {zeit:.timestamp, src:.src_ip, sig:.alert.signature}' /var/log/suricata/eve.json
+sudo grep A-06 /var/log/suricata/fast.log
+# Alarme der eigenen Regel (sofern "A-06" in msg steht)
 
 M3 Verhinderung - Firewall auf R1
 Auf R1:
@@ -193,26 +203,35 @@ configure
 # Regeln im Weiterleitungsfilter (Verkehr, der durch R1 hindurch geht).
 # Platzhalter in <> ersetzen. Reihenfolge: zuerst erlauben, dann verwerfen.
 set firewall ipv4 forward filter rule 20 action accept
+set firewall ipv4 forward filter rule 20 inbound-interface name <schnittstelle zum netz extern>
+set firewall ipv4 forward filter rule 20 destination address <adresse SRV-WEB>
 set firewall ipv4 forward filter rule 20 protocol tcp
-set firewall ipv4 forward filter rule 20 destination port <port>
-set firewall ipv4 forward filter rule 20 source address <netz>
+set firewall ipv4 forward filter rule 20 destination port <ports, durch komma getrennt>
 set firewall ipv4 forward filter rule 30 action drop
-set firewall ipv4 forward filter rule 30 protocol tcp
-set firewall ipv4 forward filter rule 30 destination port <port>
+set firewall ipv4 forward filter rule 30 inbound-interface name <schnittstelle zum netz extern>
+set firewall ipv4 forward filter rule 30 destination address <netze der TechTrade AG>
 compare
+# zeigt die Änderungen vor dem Übernehmen
 commit
 save
 exit
 show firewall ipv4 forward filter
-# zeigt die Regeln mit Zählern (Pakete, Bytes) je Regel
+# Regeln mit Zählern (Pakete, Bytes) je Regel
 
-Nachweis M3:
-Auf KALI:
-nmap -sV -p 22,443 10.10.20.13
-# erwartet: 22 filtered, 443 open
+Prüfen: Verwaltung aus dem Management-Netz geht weiter
 Auf SRV-MON:
 ssh gns3@10.10.20.13 hostname
-# erwartet: Passwortabfrage, danach SRV-WEB (SSH aus dem Management-Netz geht weiter)
+# erwartet: Passwortabfrage, danach SRV-WEB
+
+Red Team: erneuter Angriff
+Auf KALI:
+nmap -sV 10.10.20.13
+nmap -sV 10.10.100.20
+# erwartet: SRV-WEB nur noch 80 und 443, SRV-MON nichts mehr erreichbar
+for i in 1 2 3; do sshpass -p falsch ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no admin@10.10.20.13 exit; done
+# erwartet: Zeitüberschreitung (timed out) statt Passwortabfrage
+curl -k -I https://10.10.20.13
+# erwartet: Shop antwortet weiterhin
 Auf R1:
 show firewall ipv4 forward filter
 # Zähler von Regel 30 sind gestiegen = Pakete von KALI wurden verworfen
