@@ -29,6 +29,8 @@ curl -k -I https://10.10.20.13
 # -I = nur die Kopfzeilen der Antwort anzeigen (Header)
 # -k = selbstsigniertes Zertifikat akzeptieren
 # Zeile "Server:" = Software und Version des Webservers
+# Statuszeile "501 Unsupported method" ist normal: Die Shop-App beantwortet
+#   nur ganze Anfragen, keine reinen Header-Abfragen. Massgebend ist "Server:".
 
 
 ---------------------------------------------------------------------
@@ -194,13 +196,16 @@ sudo docker exec shop-proxy-1 nginx -v
 # Zustand vorher festhalten
 cd /opt/shop
 sudo nano compose.yaml
-# beim Reverse Proxy: image: nginx:<neue Version>-alpine
-sudo docker compose pull
-sudo docker compose up -d
-# up -d startet nur Container neu, deren Image oder Konfiguration geändert hat
+# beim Reverse Proxy: image: nginx:1.30.6-alpine
+sudo docker compose pull proxy
+# nur das Image des Dienstes «proxy» holen. Ohne Dienstnamen versucht Docker
+# alle Images zu holen und scheitert am Shop-Image (lokal gebaut, nicht auf Docker Hub)
+sudo docker compose up -d proxy
+# startet nur den Container des Reverse Proxy mit dem neuen Image neu
 sudo docker exec shop-proxy-1 nginx -v
 curl -k -I https://10.10.20.13
-sudo trivy image --skip-db-update --scanners vuln --ignore-unfixed nginx:<neue Version>-alpine | grep -i -A 2 nginx
+sudo trivy image --skip-db-update --scanners vuln --ignore-unfixed nginx:1.30.6-alpine
+# kurze Liste: nur Befunde mit Korrektur; zu nginx selbst darf keiner mehr erscheinen
 # Im Container wird nicht gepatcht: neues Image, neuer Container
 
 M2 Erkennung - eigene Suricata-Regel
@@ -254,7 +259,9 @@ Red Team: erneuter Angriff
 Auf KALI:
 nmap -sV 10.10.20.13
 nmap -sV 10.10.100.20
-# erwartet: SRV-WEB nur noch 80 und 443, SRV-MON nichts mehr erreichbar
+# erwartet: SRV-WEB nur noch 80 und 443
+# SRV-MON: "Host seems down" - R1 verwirft auch den Ping von Nmap.
+# Gegenprobe ohne Ping: nmap -Pn 10.10.100.20 -> alle Ports "filtered"
 for i in 1 2 3; do sshpass -p falsch ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no admin@10.10.20.13 exit; done
 # erwartet: Zeitüberschreitung (timed out) statt Passwortabfrage
 curl -k -I https://10.10.20.13
