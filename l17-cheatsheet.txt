@@ -18,6 +18,9 @@ nmap -sV 10.10.100.20
 # Spalten: PORT, STATE (open = erreichbar), SERVICE, VERSION
 # Ohne weitere Angabe prüft Nmap nur die 1000 häufigsten Ports.
 # Meldung "Unable to determine any DNS servers" ist harmlos (KALI braucht kein DNS)
+# Die Spalte SERVICE ist oft nur eine Vermutung anhand der Portnummer
+# (erkennbar am "?", z. B. "jetdirect?" auf Port 9100). Welches Programm
+# wirklich dahintersteht, zeigt erst "sudo ss -tlnp" auf dem Server.
 
 Was verrät der Webserver über sich?
 Auf KALI:
@@ -76,6 +79,11 @@ sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --ignore-unfix
 # grep -i -A 2 <name> = Zeilen mit dem Namen plus 2 Folgezeilen; keine Ausgabe = kein Befund
 # Spalten: Paket, CVE, Schweregrad, installierte Version, korrigierte Version, Titel
 # Ports 80 und 443 (nginx) laufen im Container -> Prüfung der Images
+# SRV-MON prüfen wir in diesem Lab nicht mit Trivy (Umfang). Auch nicht
+# erreichbare Systeme werden gepatcht: Wer SRV-WEB übernimmt, erreicht von dort
+# aus auch interne Systeme. Die Erreichbarkeit bestimmt die Dringlichkeit,
+# nicht, ob gepatcht wird. Für die offenen Dienste auf SRV-MON ist die
+# Sofortmassnahme die Zugriffsregel auf R1, das Patchen läuft im regulären Zyklus.
 
 Images des Shop-Stacks prüfen
 Auf SRV-WEB:
@@ -86,15 +94,15 @@ sudo trivy image --skip-db-update --scanners vuln techtrade/shop:1.4 | grep Tota
 sudo trivy image --skip-db-update --scanners vuln --ignore-unfixed nginx:1.30.5-alpine | grep -i -A 2 nginx
 # keine Ausgabe = Trivy kennt keinen Befund zu nginx selbst
 # (Befunde zu anderen Paketen im Image können trotzdem bestehen)
-# Details eines Images seitenweise ansehen (q = beenden):
-sudo trivy image --skip-db-update --scanners vuln --severity HIGH,CRITICAL nginx:1.30.5-alpine | less
 
 Meldungen abgleichen: Versionen gezielt nachschlagen
 Auf SRV-WEB:
 apt policy openssh-server
 # Installed = installierte Version, Candidate = neueste verfügbare Version
-apt changelog openssh-server | grep -m 1 -B 2 CVE-2024-6387
-# zeigt, in welcher Paketversion Ubuntu die Lücke behoben hat
+apt changelog openssh-server 2>/dev/null | grep -m 1 -B 10 CVE-2024-6387
+# zeigt, in welcher Paketversion Ubuntu die Lücke behoben hat:
+# massgebend ist die Zeile "openssh (<version>) noble-security" direkt über dem Eintrag
+# 2>/dev/null = Hinweise von apt ausblenden; -B 10 = 10 Zeilen vor dem Treffer
 # (Ubuntu übernimmt Korrekturen in ältere Versionen = Backport)
 sudo docker exec shop-proxy-1 nginx -v
 sudo docker exec shop-db-1 postgres --version
@@ -129,7 +137,8 @@ sudo suricata-update
 sudo systemctl restart suricata
 sudo systemctl status suricata --no-pager
 sudo tail -n 5 /var/log/suricata/suricata.log
-# Zeile "... rules successfully loaded" zeigt die Anzahl geladener Regeln
+# letzte Zeile «Engine started» = bereit. Erst dann angreifen (Start dauert einige Sekunden)
+# Zeile «detect: … signatures processed» = Anzahl aktiver Regeln
 
 Blue Team: Alarme live mitlesen (zweites Terminal offen lassen)
 Auf SRV-WEB:
@@ -140,6 +149,7 @@ sudo tail -f /var/log/suricata/fast.log
 Red Team: Angriff
 Auf KALI:
 nmap -sV 10.10.20.13
+nmap -sV 10.10.100.20
 
 for i in 1 2 3 4 5 6 7 8; do sshpass -p falsch ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no admin@10.10.20.13 exit; done
 # 8 Anmeldeversuche mit falschem Passwort (Benutzer admin)
@@ -151,12 +161,6 @@ Blue Team: Auswertung
 Auf SRV-WEB:
 sudo cat /var/log/suricata/fast.log
 # alle Alarme seit dem Start
-sudo grep 203.0.113.66 /var/log/suricata/fast.log
-# nur Alarme mit der Adresse von KALI
-sudo jq 'select(.event_type=="alert")' /var/log/suricata/eve.json | less
-# eve.json = dieselben Alarme mit allen Details (JSON), q = beenden
-sudo jq 'select(.event_type=="tls")' /var/log/suricata/eve.json | less
-# Was hat Suricata vom HTTPS-Aufruf gesehen? (Servername, Version - kein Inhalt)
 
 Blue Team: Systemlog der SSH-Anmeldungen
 Auf SRV-WEB:
@@ -180,15 +184,38 @@ sudo apt install --only-upgrade openssh-server
 # weil openssh-server genau dieselbe Version davon verlangt
 apt policy openssh-server
 # Installed muss mindestens der Version aus Meldung A-01 entsprechen
+# Achtung: Versionen sind keine Dezimalzahlen. 13.20 ist NEUER als 13.3 (20 > 3).
+dpkg --compare-versions 1:9.6p1-3ubuntu13.20 ge 1:9.6p1-3ubuntu13.3 && echo ja
+# ja = installierte Version ist mindestens so neu wie die korrigierte
+
+M4 Behebung - Image des Reverse Proxy ersetzen
+Auf SRV-WEB:
+sudo docker exec shop-proxy-1 nginx -v
+# Zustand vorher festhalten
+cd /opt/shop
+sudo nano compose.yaml
+# beim Reverse Proxy: image: nginx:<neue Version>-alpine
+sudo docker compose pull
+sudo docker compose up -d
+# up -d startet nur Container neu, deren Image oder Konfiguration geändert hat
+sudo docker exec shop-proxy-1 nginx -v
+curl -k -I https://10.10.20.13
+sudo trivy image --skip-db-update --scanners vuln --ignore-unfixed nginx:<neue Version>-alpine | grep -i -A 2 nginx
+# Im Container wird nicht gepatcht: neues Image, neuer Container
 
 M2 Erkennung - eigene Suricata-Regel
 Auf SRV-WEB:
 sudo nano /etc/suricata/rules/local.rules
-# Aufbau einer Regel (Platzhalter in <> ersetzen, eine Zeile):
-#   alert <protokoll> <quelle> any -> <ziel> any (msg:"<Text mit Verweis auf die Meldung>"; sid:<nummer>; rev:1;)
-# <protokoll> ip = jeder IP-Verkehr
-# <ziel> $HOME_NET = die Netze aus HOME_NET
-# sid = Signatur-ID; eigene Regeln ab 1000000
+# folgende Zeile in die Datei einfügen (eine Zeile), speichern:
+alert ip 203.0.113.66 any -> $HOME_NET any (msg:"A-06 Verkehr von bekannter Angriffsadresse aus Threat-Feed"; sid:1000001; rev:1;)
+# alert             = melden (nicht blockieren)
+# ip                = jeder IP-Verkehr (TCP, UDP, ICMP)
+# 203.0.113.66 any  = Quelle: Adresse aus A-06, beliebiger Port
+# ->                = Richtung: von der Quelle zum Ziel
+# $HOME_NET any     = Ziel: Netze der TechTrade AG, beliebiger Port
+# msg               = Alarmtext mit Verweis auf A-06 (dafür grep A-06)
+# sid               = Signatur-ID; eigene Regeln ab 1000000
+# rev               = Version der Regel, bei jeder Änderung +1
 sudo suricata -T -c /etc/suricata/suricata.yaml
 sudo systemctl restart suricata
 Auf KALI (Regel auslösen):
