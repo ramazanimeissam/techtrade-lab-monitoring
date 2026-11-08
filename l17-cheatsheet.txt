@@ -10,38 +10,65 @@ Jeder Block nennt das System, auf dem er läuft.
 1. BESTAND ERFASSEN
 ---------------------------------------------------------------------
 
-Auf SRV-WEB und auf SRV-MON:
-dpkg-query -W openssh-server
-# dpkg-query -W = Paketname und installierte Version
-dpkg-query -W | wc -l
-# Anzahl installierter Pakete (wc -l = Zeilen zählen)
+Ziel: herausfinden, was läuft und was erreichbar ist - ohne vorgegebene Liste.
+Jedes Werkzeug zeigt nur einen Ausschnitt. Erst zusammen ergeben sie das Inventar.
 
-Auf SRV-WEB:
-sudo docker ps --format 'table {{.Names}}\t{{.Image}}'
-# welche Images verwendet der Shop-Stack?
-
-# Images mit Trivy prüfen (Datenbank ist vorgeladen, kein Download)
-sudo trivy image --skip-db-update --scanners vuln nginx:1.30.5-alpine | head -20
-# --skip-db-update = Datenbank nicht aktualisieren (Stand der Vorlage)
-# --scanners vuln  = nur Schwachstellen, keine Secrets/Konfiguration
-# Die Zeile "Total: ..." zeigt die Anzahl je Schweregrad
-sudo trivy image --skip-db-update --scanners vuln postgres:16.15-alpine | head -20
-sudo trivy image --skip-db-update --scanners vuln techtrade/shop:1.4 | head -20
-
-# Nur die schweren Befunde eines Images
-sudo trivy image --skip-db-update --scanners vuln --severity HIGH,CRITICAL nginx:1.30.5-alpine
-
+Schritt 1 - Was ist von aussen erreichbar?
 Auf KALI:
 nmap -sV 10.10.20.13
 nmap -sV 10.10.100.20
 # -sV = Versionserkennung: Nmap fragt die Dienste nach ihrer Kennung
-# Spalten: PORT, STATE (open/closed/filtered), SERVICE, VERSION
+# Spalten: PORT, STATE (open = erreichbar), SERVICE, VERSION
+# Nmap sieht nur, was über das Netz antwortet - nichts, was nur lokal läuft
 
+Schritt 2 - Welche Dienste laufen auf dem Server, auf welchen Ports?
+Auf SRV-WEB und auf SRV-MON:
+sudo ss -tlnp
+# ss = Netzwerkverbindungen anzeigen
+# -t = TCP, -l = nur wartende Ports (listen), -n = Zahlen statt Namen,
+# -p = zugehöriges Programm
+# Spalte "Local Address:Port": 0.0.0.0 oder * = auf allen Adressen erreichbar,
+# 127.0.0.1 = nur lokal
+systemctl list-units --type=service --state=running --no-pager
+# alle laufenden Dienste des Betriebssystems
+
+Schritt 3 - Laufen Container? Aus welchen Images?
+Auf SRV-WEB und auf SRV-MON:
+sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
+# Name, Image (mit Version im Tag) und veröffentlichte Ports je Container
+# Software in Containern kennt die Paketverwaltung des Servers (apt) nicht
+
+Schritt 4 - Betriebssystem-Pakete von SRV-WEB auf Schwachstellen prüfen
+Auf SRV-WEB:
+sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --skip-dirs /proc,/sys,/var/lib/docker / | head -20
+# rootfs /          = das Dateisystem des Servers prüfen
+# --skip-db-update  = Datenbank nicht aktualisieren (Stand der Vorlage)
+# --scanners vuln   = nur Schwachstellen
+# --pkg-types os    = nur Pakete des Betriebssystems (apt)
+# --skip-dirs       = Systemordner und Container-Daten auslassen
+# Die Zeile "Total: ..." zeigt die Anzahl je Schweregrad
+sudo trivy rootfs --skip-db-update --scanners vuln --pkg-types os --skip-dirs /proc,/sys,/var/lib/docker --severity CRITICAL,HIGH /
+# nur kritische und hohe Befunde, mit Paket, CVE, installierter und behobener Version
+
+Schritt 5 - Images des Shop-Stacks prüfen
+Auf SRV-WEB (Image-Namen aus Schritt 3):
+sudo trivy image --skip-db-update --scanners vuln nginx:1.30.5-alpine | head -20
+sudo trivy image --skip-db-update --scanners vuln postgres:16.15-alpine | head -20
+sudo trivy image --skip-db-update --scanners vuln techtrade/shop:1.4 | head -20
+
+Schritt 6 - R1
 Auf R1:
 show version
 show configuration commands | match service
 # zeigt alle aktiven Dienste auf R1 (z. B. ssh, https)
 
+Einzelne Version gezielt nachschlagen (bei Bedarf):
+Auf SRV-WEB:
+apt policy openssh-server
+# Installed = installierte Version, (none) = nicht installiert
+# Candidate = neueste verfügbare Version
+sudo docker exec shop-proxy-1 nginx -v
+# Version von nginx im Container shop-proxy-1
 
 ---------------------------------------------------------------------
 2. SICHERHEITSMELDUNGEN BEURTEILEN
