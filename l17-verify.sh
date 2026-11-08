@@ -21,10 +21,6 @@ if [ -d /etc/suricata ]; then
   N=$(sudo docker ps --format '{{.Names}}' | grep -c '^shop-')
   [ "$N" -eq 3 ] && ok "Shop-Stack 3 Container" || bad "Shop-Stack $N Container"
   curl -sk -o /dev/null -w '%{http_code}' https://localhost | grep -q 200 && ok "Shop HTTPS 200" || bad "Shop HTTPS nicht 200"
-elif [ -d ~/ansible ]; then
-  echo "== SRV-MON =="
-  cd ~/ansible && ansible linux -m ansible.builtin.ping -o | grep -c SUCCESS | grep -q 2 && ok "Ansible erreicht beide Server" || bad "Ansible ping"
-  ansible srv-web -b -m ansible.builtin.command -a "true" -o >/dev/null 2>&1 && ok "Ansible become auf SRV-WEB" || bad "Ansible become"
 fi
 [ -f ~/Desktop/lab-cheatsheet.txt ] && ok "Cheatsheet auf dem Desktop" || bad "Cheatsheet fehlt"
 echo "== $E Fehler =="

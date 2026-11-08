@@ -2,7 +2,7 @@
 PLAN-200 · Lektion 17 · Lab-Cheatsheet
 Threat Intelligence, Schwachstellen beurteilen, Angriffe erkennen
 =====================================================================
-Anmeldung: Server gns3 / Gns3456 · KALI kali / Gns3456 · R1 vyos / Gns3456
+Anmeldung: Server und KALI gns3 / Gns3456 · R1 vyos / Gns3456
 Jeder Block nennt das System, auf dem er läuft.
 
 
@@ -10,20 +10,11 @@ Jeder Block nennt das System, auf dem er läuft.
 1. BESTAND ERFASSEN
 ---------------------------------------------------------------------
 
-Auf SRV-MON:
-cd ~/ansible
-cat inventory.yml                     # welche Server verwaltet Ansible?
-ansible linux -m ansible.builtin.ping -o
-# -o = eine Zeile pro Server
-
-# Installierte Pakete aller Server erfassen (package_facts)
-# und die Einträge für openssh-server herausfiltern
-ansible linux -m ansible.builtin.package_facts | grep -A 6 '"openssh-server"'
-# grep -A 6 = Treffer plus 6 Folgezeilen (darin steht "version")
-
-# Kürzer: nur die Version eines Pakets abfragen
-ansible linux -m ansible.builtin.command -a "dpkg-query -W openssh-server"
+Auf SRV-WEB und auf SRV-MON:
+dpkg-query -W openssh-server
 # dpkg-query -W = Paketname und installierte Version
+dpkg-query -W | wc -l
+# Anzahl installierter Pakete (wc -l = Zeilen zählen)
 
 Auf SRV-WEB:
 sudo docker ps --format 'table {{.Names}}\t{{.Image}}'
@@ -134,25 +125,25 @@ sudo journalctl -u ssh --since "15 min ago" | grep -i -E "failed|invalid"
 ---------------------------------------------------------------------
 
 Zustand vorher festhalten:
-Auf SRV-MON:
-cd ~/ansible
-ansible srv-web -m ansible.builtin.command -a "dpkg-query -W openssh-server"
+Auf SRV-WEB:
+dpkg-query -W openssh-server
 Auf KALI:
 nmap -sV -p 22,443 10.10.20.13
 # -p = nur diese Ports prüfen
 
-M1 Behebung - OpenSSH mit Ansible aktualisieren
-Auf SRV-MON:
-cd ~/ansible
-ansible srv-web -b -m ansible.builtin.apt -a "name=openssh-server state=latest update_cache=yes cache_valid_time=3600"
-# -b = become (als root ausführen)
-# state=latest = auf die neueste verfügbare Version bringen (nur dieses Paket
-#   und die Pakete, von denen es abhängt)
-# update_cache=yes = Paketlisten vorher aktualisieren, cache_valid_time=3600
-#   = nicht erneut, wenn die Listen jünger als 1 Stunde sind
-# erwartet: CHANGED
-# denselben Befehl ein zweites Mal ausführen -> erwartet: SUCCESS, "changed": false
-ansible srv-web -m ansible.builtin.command -a "dpkg-query -W openssh-server"
+M1 Behebung - nur OpenSSH aktualisieren
+Auf SRV-WEB:
+sudo apt update
+sudo apt install --only-upgrade openssh-server
+# --only-upgrade = nur aktualisieren, falls installiert; nichts neu installieren
+# apt aktualisiert openssh-client und openssh-sftp-server mit,
+# weil openssh-server genau dieselbe Version davon verlangt
+dpkg-query -W openssh-server
+apt changelog openssh-server | grep -m 1 -B 2 CVE-2024-6387
+# die installierte Version muss mindestens die behobene Version sein
+Auf KALI:
+nmap -sV -p 22 10.10.20.13
+# die gemeldete Version endet jetzt mit der neuen Paketrevision
 
 M2 Erkennung - eigene Suricata-Regel
 Auf SRV-WEB:
@@ -193,9 +184,8 @@ Auf KALI:
 nmap -sV -p 22,443 10.10.20.13
 # erwartet: 22 filtered, 443 open
 Auf SRV-MON:
-cd ~/ansible
-ansible srv-web -m ansible.builtin.ping -o
-# erwartet: SUCCESS (Verwaltung aus dem Management-Netz geht weiter)
+ssh gns3@10.10.20.13 hostname
+# erwartet: Passwortabfrage, danach SRV-WEB (SSH aus dem Management-Netz geht weiter)
 Auf R1:
 show firewall ipv4 forward filter
 # Zähler von Regel 30 sind gestiegen = Pakete von KALI wurden verworfen

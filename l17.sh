@@ -62,39 +62,6 @@ web)
   ;;
 mon)
   echo "== SRV-MON =="
-  apt-get update -q
-  apt-get install -y -q ansible sshpass >/dev/null && ok "ansible, sshpass installiert" || fail "apt ansible"
-  H=/home/gns3
-  sudo -u gns3 bash -c "[ -f $H/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f $H/.ssh/id_ed25519"
-  for T in 10.10.20.13 10.10.100.20; do
-    sudo -u gns3 sshpass -p "$PW" ssh-copy-id -o StrictHostKeyChecking=accept-new -i $H/.ssh/id_ed25519.pub gns3@$T >/dev/null 2>&1 \
-      && ok "SSH-Schluessel auf $T" || fail "SSH-Schluessel auf $T"
-  done
-  mkdir -p $H/ansible/group_vars
-  cat > $H/ansible/ansible.cfg <<'C'
-[defaults]
-inventory = inventory.yml
-host_key_checking = False
-C
-  cat > $H/ansible/inventory.yml <<'C'
----
-all:
-  children:
-    linux:
-      hosts:
-        srv-web:
-          ansible_host: 10.10.20.13
-        srv-mon:
-          ansible_host: 10.10.100.20
-C
-  cat > $H/ansible/group_vars/linux.yml <<'C'
----
-ansible_user: gns3
-ansible_become_password: Gns3456
-C
-  chown -R gns3:gns3 $H/ansible
-  ok "Ansible-Projekt in ~/ansible"
-  mkdir -p $H/lab; wget -q "$REPO/l17-verify.sh" -O $H/lab/l17-verify.sh; chown -R gns3:gns3 $H/lab
   cheatsheet gns3
   ;;
 kali)
