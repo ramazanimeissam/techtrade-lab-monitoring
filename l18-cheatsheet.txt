@@ -1,0 +1,246 @@
+=====================================================================
+PLAN-200 · Lektion 18 · Lab-Cheatsheet
+Kapazitäten prognostizieren und Plattformen skalieren
+=====================================================================
+Anmeldung: Server gns3 / Gns3456 · R1 vyos / Gns3456 · Grafana admin / Gns3456
+Jeder Block nennt das System, auf dem er läuft.
+
+Grafana:  Firefox auf SRV-MON, http://localhost:3000
+          Dashboards -> Kapazität Shop
+          Zeitraum oben rechts (z. B. Last 15 minutes), Aktualisierung alle 10 s
+Mailpit:  Firefox auf SRV-MON, http://localhost:8025
+
+
+---------------------------------------------------------------------
+1 · KAPAZITÄT DER WAN-LEITUNG
+---------------------------------------------------------------------
+
+Durchsatz messen (zwei Terminals)
+
+Auf SRV-WEB:
+iperf3 -s
+# -s = Server: wartet auf Messungen (TCP-Port 5201)
+# läuft, bis Sie Ctrl+C drücken
+
+Auf SRV-MON:
+iperf3 -c 10.10.20.13 -t 30
+# -c = Client: misst gegen den Server 10.10.20.13
+# -t 30 = 30 Sekunden lang senden
+# Massgebend ist die Zeile "receiver" ganz unten (Spalte Bitrate)
+iperf3 -c 10.10.20.13 -t 30 -R
+# -R = umgekehrte Richtung: SRV-WEB sendet, SRV-MON empfängt
+
+Während der Messung: Grafana -> Kapazität Shop -> Panel "WAN-Leitung Rechenzentrum"
+# Das Panel zeigt ein Mittel über 1 Minute: der Wert steigt verzögert
+# und erreicht bei 30 s Messdauer nicht ganz den iperf3-Wert.
+
+Wie ist die Begrenzung konfiguriert?
+Auf R1:
+show configuration commands | match qos
+# | match qos = nur Zeilen mit "qos" anzeigen
+# "qos policy shaper <NAME> bandwidth ..."  = Bandbreite der Begrenzung
+# "qos interface <ethX> egress <NAME>"      = Schnittstelle, auf der sie gilt
+#   (egress = ausgehende Richtung dieser Schnittstelle)
+
+Messdaten öffnen
+Auf SRV-MON:
+localc ~/lab/kapazitaet.xlsx &
+# localc = LibreOffice Calc; & = im Hintergrund, das Terminal bleibt frei
+# Blätter (Reiter unten): Leitung, Prognose, Shop
+# Alle Werte sind berechnet. Sie schreiben keine Formeln.
+
+
+---------------------------------------------------------------------
+2 · GESCHÄFTSPLANUNG IN EINE ZIELLAST ÜBERSETZEN
+---------------------------------------------------------------------
+
+Datei wie oben, Blatt "Shop": Monatswerte, Geschäftsplanung 2027,
+Szenarien S1 bis S6, naive Restlaufzeit der Datenbank.
+
+
+---------------------------------------------------------------------
+3 · LASTTEST VOR DER SKALIERUNG
+---------------------------------------------------------------------
+
+Ziellast eintragen
+Auf SRV-MON:
+cd ~/lab/k6
+nano weihnachten.js
+# Zeile:  const ANFRAGEN_PRO_SEKUNDE = 1;
+# Die 1 durch Ihre Ziellast ersetzen
+# Speichern: Ctrl+O, Enter · Beenden: Ctrl+X
+
+Lasttest starten (dauert 2 Minuten)
+Auf SRV-MON:
+cd ~/lab/k6
+sudo docker run --rm -i grafana/k6:1.3.0 run - < weihnachten.js
+# docker run --rm = k6 als Container starten, nach dem Test löschen
+# -i = Eingabe an den Container weiterreichen
+# run - = Testskript von der Eingabe lesen; < weihnachten.js = diese Datei
+#
+# Zusammenfassung am Schluss lesen:
+#   THRESHOLDS            Zielwerte; Häkchen = erfüllt, Kreuz = verletzt
+#   http_req_duration     Antwortzeit; p(95)=... ist das 95. Perzentil
+#   http_req_failed       Anteil fehlgeschlagener Anfragen
+#   http_reqs             Anzahl Anfragen und erreichte Rate (.../s)
+#   dropped_iterations    Anfragen, die k6 gar nicht senden konnte, weil
+#                         alle virtuellen Benutzer noch auf Antworten warteten
+# Meldungen "request timeout" oder Status 504 während des Tests:
+#   Der Shop antwortet nicht innerhalb der Wartezeit des Reverse Proxys.
+
+Während des Tests beobachten
+Grafana -> Kapazität Shop: CPU pro Container, Antwortzeit, Leitung
+# Gestrichelte Linien = CPU-Limit der Applikationsserver
+Mailpit: Mails des Monitorings
+
+Live-Ansicht der Container (optional)
+Auf SRV-WEB:
+sudo docker stats
+# CPU % und Arbeitsspeicher pro Container, laufend aktualisiert; Ctrl+C beendet
+# CPU % bezieht sich auf eine ganze CPU: ein Container mit Limit 0.25 CPU
+# zeigt höchstens etwa 25 %
+
+
+---------------------------------------------------------------------
+4 · PLATTFORM HORIZONTAL SKALIEREN
+---------------------------------------------------------------------
+
+Reihenfolge: zuerst die Compose-Datei (app3 starten),
+danach die nginx-Konfiguration (neu laden).
+
+Sicherungskopien anlegen (Rückweg)
+Auf SRV-WEB:
+cd /opt/shop
+sudo cp compose.yaml compose.yaml.orig
+sudo cp nginx/default.conf nginx/default.conf.orig
+
+Compose-Datei erweitern
+Auf SRV-WEB:
+cd /opt/shop
+sudo nano compose.yaml
+# Bausteine (Werte selbst bestimmen):
+#
+#   <dienst>:                      # Name des Dienstes
+#     image: <image>:<version>
+#     environment:
+#       <VARIABLE>: <wert>
+#     deploy:
+#       resources:
+#         limits:
+#           cpus: "<anteil>"       # Anteil CPUs, "1.0" = eine ganze CPU
+#           memory: <zahl>M        # Arbeitsspeicher in MB
+#     depends_on:
+#       - <dienst>                 # startet erst nach diesem Dienst
+#
+# Ein neuer Dienst braucht alles, was ein bestehender gleichartiger Dienst
+# hat: Image, Umgebungsvariablen, Secret, Netze, Abhängigkeiten, Neustart.
+# Einrückung mit Leerzeichen, nie mit Tabulator.
+
+Compose-Datei prüfen und übernehmen
+Auf SRV-WEB:
+cd /opt/shop
+sudo docker compose config -q
+# config = Datei prüfen; -q = nur Fehler anzeigen (keine Ausgabe = gültig)
+sudo docker compose up -d
+# up -d = Stack im Hintergrund an die Datei anpassen:
+#         startet nur, was neu oder geändert ist
+sudo docker compose ps
+# Status aller Dienste des Stacks
+
+nginx-Konfiguration erweitern
+Auf SRV-WEB:
+cd /opt/shop
+sudo nano nginx/default.conf
+# Bausteine (Werte selbst bestimmen):
+#
+#   proxy_cache_path <verzeichnis> levels=1:2 keys_zone=<zone>:<grösse>
+#                    max_size=<grösse> inactive=<zeit>;
+#   # gehört ausserhalb von server { ... }; Grössen z. B. 5m, 1g; Zeit z. B. 30m
+#   # keys_zone = Name und Arbeitsspeicher für die Schlüssel der Einträge
+#   # inactive  = so lange nicht abgerufen -> Eintrag wird entfernt
+#
+#   upstream <name> {
+#       server <dienst>:<port> weight=<zahl>;
+#   }
+#   # Anteil eines Servers = sein Gewicht ÷ Summe aller Gewichte
+#   # ohne weight gilt Gewicht 1
+#
+#   location <pfad> {
+#       proxy_pass http://<upstream>;
+#       proxy_cache <zone>;                       # Cache-Zone verwenden
+#       proxy_cache_valid <status> <zeit>;        # Gültigkeit im Cache
+#       add_header <Header-Name> $upstream_cache_status;
+#       # $upstream_cache_status = HIT (aus dem Cache), MISS, EXPIRED ...
+#   }
+#   # nginx wählt die location mit dem längsten passenden Pfad
+
+nginx-Konfiguration prüfen und neu laden
+Auf SRV-WEB:
+cd /opt/shop
+sudo docker compose exec proxy nginx -t
+# exec proxy = Befehl im laufenden Container proxy ausführen
+# nginx -t = Konfiguration prüfen ("syntax is ok", "test is successful")
+sudo docker compose exec proxy nginx -s reload
+# -s reload = neue Konfiguration laden, ohne laufende Verbindungen zu trennen
+
+Verteilung prüfen: 40 Aufrufe der Shop-Seite
+Auf SRV-WEB:
+for i in $(seq 1 40); do curl -sk -o /dev/null -D - https://localhost/ | grep -i x-backend; done | sort | uniq -c
+# for ... done = 40-mal wiederholen
+# curl -s = ohne Fortschrittsanzeige; -k = selbstsigniertes Zertifikat akzeptieren
+# -o /dev/null = Seite verwerfen; -D - = Antwort-Header anzeigen
+# grep -i x-backend = nur die Zeile X-Backend (-i = Gross/klein egal)
+# sort | uniq -c = gleiche Zeilen zählen
+
+Cache prüfen
+Auf SRV-WEB:
+curl -sk -o /dev/null -D - https://localhost/static/shop.css | grep -i -E "x-cache|x-backend"
+# zweimal hintereinander ausführen und die Zeile X-Cache-Status vergleichen
+# -E = mehrere Suchbegriffe, getrennt mit |
+curl -sk -o /dev/null -D - https://localhost/ | grep -i x-cache
+# Shop-Seite: keine Ausgabe = keine Zeile X-Cache-Status
+
+Shop von SRV-MON aus über HTTP und HTTPS
+Auf SRV-MON:
+curl -s -o /dev/null -w "%{http_code}\n" http://10.10.20.13/
+curl -sk -o /dev/null -w "%{http_code}\n" https://10.10.20.13/
+# -w "%{http_code}\n" = nur den HTTP-Status ausgeben (200 = in Ordnung)
+
+Logs bei Problemen
+Auf SRV-WEB:
+cd /opt/shop
+sudo docker compose logs --tail 20 proxy
+sudo docker compose logs --tail 20 app3
+# --tail 20 = nur die letzten 20 Zeilen
+
+Rückweg (falls nötig)
+Auf SRV-WEB:
+cd /opt/shop
+sudo cp compose.yaml.orig compose.yaml
+sudo cp nginx/default.conf.orig nginx/default.conf
+sudo docker compose up -d --remove-orphans
+# --remove-orphans = Container entfernen, die nicht mehr in der Datei stehen
+sudo docker compose exec proxy nginx -s reload
+
+
+---------------------------------------------------------------------
+5 · WIRKUNG NACHWEISEN UND N+1
+---------------------------------------------------------------------
+
+Gleicher Lasttest wie vorher (Ziellast unverändert)
+Auf SRV-MON:
+cd ~/lab/k6
+sudo docker run --rm -i grafana/k6:1.3.0 run - < weihnachten.js
+
+Ausfall von app3 während des Tests
+Auf SRV-MON:  Lasttest starten wie oben
+Auf SRV-WEB:  nach etwa 30 Sekunden
+cd /opt/shop
+sudo docker compose stop app3
+# stop = Container anhalten (bleibt bestehen, kann wieder gestartet werden)
+
+Nach dem Test
+Auf SRV-WEB:
+cd /opt/shop
+sudo docker compose start app3
+sudo docker compose ps
