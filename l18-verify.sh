@@ -32,8 +32,8 @@ if [ -d /etc/prometheus ]; then
   sudo docker image inspect grafana/k6:1.3.0 >/dev/null 2>&1 && ok "Image grafana/k6:1.3.0" || bad "k6-Image fehlt"
   [ -f ~/lab/k6/weihnachten.js ] && ok "~/lab/k6/weihnachten.js" || bad "weihnachten.js fehlt"
   [ -f ~/lab/kapazitaet.xlsx ] && ok "~/lab/kapazitaet.xlsx" || bad "kapazitaet.xlsx fehlt"
-  curl -s 'http://localhost:9090/api/v1/query?query=up{job="cadvisor"}' | grep -q '"1"\]' && ok "Prometheus: cadvisor UP" || bad "Prometheus: cadvisor nicht UP"
-  curl -s 'http://localhost:9090/api/v1/query?query=up{job="snmp"}' | grep -q '"1"\]' && ok "Prometheus: snmp UP" || bad "Prometheus: snmp nicht UP"
+  curl -sg 'http://localhost:9090/api/v1/query?query=up{job="cadvisor"}' | grep -q '"1"\]' && ok "Prometheus: cadvisor UP" || bad "Prometheus: cadvisor nicht UP"
+  curl -sg 'http://localhost:9090/api/v1/query?query=up{job="snmp"}' | grep -q '"1"\]' && ok "Prometheus: snmp UP" || bad "Prometheus: snmp nicht UP"
   curl -sf -u admin:Gns3456 http://localhost:3000/api/dashboards/uid/kapazitaet-shop >/dev/null && ok "Dashboard Kapazität Shop" || bad "Dashboard fehlt"
   curl -sk -o /dev/null -w '%{http_code}' https://10.10.20.13/ | grep -q 200 && ok "Shop von SRV-MON erreichbar" || bad "Shop von SRV-MON nicht erreichbar"
 fi
