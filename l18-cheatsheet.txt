@@ -2,7 +2,7 @@
 PLAN-200 · Lektion 18 · Lab-Cheatsheet
 Kapazitäten prognostizieren und Plattformen skalieren
 =====================================================================
-Anmeldung: Server gns3 / Gns3456 · R1 vyos / Gns3456 · Grafana admin / Gns3456
+Anmeldung: Server und KUNDE gns3 / Gns3456 · R1 vyos / Gns3456 · Grafana admin / Gns3456
 Jeder Block nennt das System, auf dem er läuft.
 
 Grafana:  Firefox auf SRV-MON, http://localhost:3000
@@ -12,41 +12,46 @@ Mailpit:  Firefox auf SRV-MON, http://localhost:8025
 
 
 ---------------------------------------------------------------------
-1 · KAPAZITÄT DER WAN-LEITUNG
+1 · KAPAZITÄT DES INTERNETANSCHLUSSES
 ---------------------------------------------------------------------
 
 Durchsatz messen (zwei Terminals)
+KUNDE steht im Internet und erreicht TechTrade über die öffentliche
+Adresse 203.0.113.1. R1 leitet Port 5201 an SRV-WEB weiter.
 
 Auf SRV-WEB:
 iperf3 -s
 # -s = Server: wartet auf Messungen (TCP-Port 5201)
 # läuft, bis Sie Ctrl+C drücken
 
-Auf SRV-MON:
-iperf3 -c 10.10.20.13 -t 30
-# -c = Client: misst gegen den Server 10.10.20.13
+Auf KUNDE:
+iperf3 -c 203.0.113.1 -t 30
+# -c = Client: misst gegen den Server hinter 203.0.113.1
 # -t 30 = 30 Sekunden lang senden
+# KUNDE sendet -> Richtung Internet zu TechTrade = DOWNLOAD von TechTrade
 # Massgebend ist die Zeile "receiver" ganz unten (Spalte Bitrate)
-iperf3 -c 10.10.20.13 -t 30 -R
-# -R = umgekehrte Richtung: SRV-WEB sendet, SRV-MON empfängt
+iperf3 -c 203.0.113.1 -t 30 -R
+# -R = umgekehrte Richtung: SRV-WEB sendet zu KUNDE = UPLOAD von TechTrade
 
-Während der Messung: Grafana -> Kapazität Shop -> Panel "WAN-Leitung Rechenzentrum"
+Während der Messung: Grafana -> Kapazität Shop -> Panel "Internetanschluss (R1 eth3)"
+# Upload = Verkehr von TechTrade ins Internet, Download = aus dem Internet
 # Das Panel zeigt ein Mittel über 1 Minute: der Wert steigt verzögert
 # und erreicht bei 30 s Messdauer nicht ganz den iperf3-Wert.
 
-Wie ist die Begrenzung konfiguriert?
+Wie sind Begrenzung und Weiterleitung konfiguriert?
 Auf R1:
 show configuration commands | match qos
-# | match qos = nur Zeilen mit "qos" anzeigen
 # "qos policy shaper <NAME> bandwidth ..."  = Bandbreite der Begrenzung
-# "qos interface <ethX> egress <NAME>"      = Schnittstelle, auf der sie gilt
-#   (egress = ausgehende Richtung dieser Schnittstelle)
+# "qos interface <ethX> egress <NAME>"      = Schnittstelle und Richtung
+#   (egress = was R1 über diese Schnittstelle hinaus sendet)
+show configuration commands | match "nat destination"
+# Destination NAT: welche Ports der öffentlichen Adresse wohin weitergeleitet werden
 
 Messdaten öffnen
 Auf SRV-MON:
 localc ~/lab/kapazitaet.xlsx &
 # localc = LibreOffice Calc; & = im Hintergrund, das Terminal bleibt frei
-# Blätter (Reiter unten): Leitung, Prognose, Shop
+# Blätter (Reiter unten): Internet, Prognose, Shop
 # Alle Werte sind berechnet. Sie schreiben keine Formeln.
 
 
@@ -63,7 +68,7 @@ Szenarien S1 bis S6, naive Restlaufzeit der Datenbank.
 ---------------------------------------------------------------------
 
 Ziellast eintragen
-Auf SRV-MON:
+Auf KUNDE:
 cd ~/lab/k6
 nano weihnachten.js
 # Zeile:  const ANFRAGEN_PRO_SEKUNDE = 1;
@@ -71,7 +76,7 @@ nano weihnachten.js
 # Speichern: Ctrl+O, Enter · Beenden: Ctrl+X
 
 Lasttest starten (dauert 2 Minuten)
-Auf SRV-MON:
+Auf KUNDE:
 cd ~/lab/k6
 sudo docker run --rm -i grafana/k6:1.3.0 run - < weihnachten.js
 # docker run --rm = k6 als Container starten, nach dem Test löschen
@@ -91,6 +96,7 @@ sudo docker run --rm -i grafana/k6:1.3.0 run - < weihnachten.js
 Während des Tests beobachten
 Grafana -> Kapazität Shop: CPU pro Container, Antwortzeit, Leitung
 # Gestrichelte Linien = CPU-Limit der Applikationsserver
+# Grafana läuft auf SRV-MON (Firefox), der Lasttest auf KUNDE
 Mailpit: Mails des Monitorings
 
 Live-Ansicht der Container (optional)
@@ -200,10 +206,10 @@ curl -sk -o /dev/null -D - https://localhost/static/shop.css | grep -i -E "x-cac
 curl -sk -o /dev/null -D - https://localhost/ | grep -i x-cache
 # Shop-Seite: keine Ausgabe = keine Zeile X-Cache-Status
 
-Shop von SRV-MON aus über HTTP und HTTPS
-Auf SRV-MON:
-curl -s -o /dev/null -w "%{http_code}\n" http://10.10.20.13/
-curl -sk -o /dev/null -w "%{http_code}\n" https://10.10.20.13/
+Shop von KUNDE aus über HTTP und HTTPS (öffentliche Adresse)
+Auf KUNDE:
+curl -s -o /dev/null -w "%{http_code}\n" http://203.0.113.1/
+curl -sk -o /dev/null -w "%{http_code}\n" https://203.0.113.1/
 # -w "%{http_code}\n" = nur den HTTP-Status ausgeben (200 = in Ordnung)
 
 Logs bei Problemen
@@ -228,12 +234,12 @@ sudo docker compose exec proxy nginx -s reload
 ---------------------------------------------------------------------
 
 Gleicher Lasttest wie vorher (Ziellast unverändert)
-Auf SRV-MON:
+Auf KUNDE:
 cd ~/lab/k6
 sudo docker run --rm -i grafana/k6:1.3.0 run - < weihnachten.js
 
 Ausfall von app3 während des Tests
-Auf SRV-MON:  Lasttest starten wie oben
+Auf KUNDE:    Lasttest starten wie oben
 Auf SRV-WEB:  nach etwa 30 Sekunden
 cd /opt/shop
 sudo docker compose stop app3
