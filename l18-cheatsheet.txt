@@ -4,6 +4,9 @@ Kapazitäten prognostizieren und Plattformen skalieren
 =====================================================================
 Anmeldung: Server und KUNDE gns3 / Gns3456 · R1 vyos / Gns3456 · Grafana admin / Gns3456
 Jeder Block nennt das System, auf dem er läuft.
+Zeilen ohne # = Befehl im Terminal. Zeilen mit # = Erklärung.
+Kästen «Bausteine» = Text für eine Konfigurationsdatei: in die Datei
+kopieren und alle <...> durch Ihre Werte ersetzen.
 
 Grafana:  Firefox auf SRV-MON, http://localhost:3000
           Dashboards -> Kapazität Shop
@@ -25,25 +28,27 @@ iperf3 -s
 # läuft, bis Sie Ctrl+C drücken
 
 Auf KUNDE:
-iperf3 -c 203.0.113.1 -t 30
+iperf3 -c 203.0.113.1 -t 15
 # -c = Client: misst gegen den Server hinter 203.0.113.1
-# -t 30 = 30 Sekunden lang senden
+# -t 15 = 15 Sekunden lang senden
 # KUNDE sendet -> Richtung Internet zu TechTrade = DOWNLOAD von TechTrade
 # Massgebend ist die Zeile "receiver" ganz unten (Spalte Bitrate)
-iperf3 -c 203.0.113.1 -t 30 -R
+iperf3 -c 203.0.113.1 -t 15 -R
 # -R = umgekehrte Richtung: SRV-WEB sendet zu KUNDE = UPLOAD von TechTrade
+# Jede Richtung zweimal messen, den besseren Wert eintragen
 
 Während der Messung: Grafana -> Kapazität Shop -> Panel "Internetanschluss (R1 eth3)"
 # Upload = Verkehr von TechTrade ins Internet, Download = aus dem Internet
 # Das Panel zeigt ein Mittel über 1 Minute: der Wert steigt verzögert
-# und erreicht bei 30 s Messdauer nicht ganz den iperf3-Wert.
+# und erreicht bei 15 s Messdauer nicht ganz den iperf3-Wert.
 
-Wie sind Begrenzung und Weiterleitung konfiguriert?
+Traffic Shaping, Rate Limiting und Destination NAT anzeigen
 Auf R1:
 show configuration commands | match qos
-# "qos policy shaper <NAME> bandwidth ..."  = Bandbreite der Begrenzung
-# "qos interface <ethX> egress <NAME>"      = Schnittstelle und Richtung
-#   (egress = was R1 über diese Schnittstelle hinaus sendet)
+# "qos policy shaper <NAME> bandwidth ..."   = Traffic Shaping (puffert)
+# "qos policy limiter <NAME> ... bandwidth"  = Rate Limiting (verwirft)
+# "qos interface <ethX> egress <NAME>"       = gilt für das, was R1 hinaus sendet
+# "qos interface <ethX> ingress <NAME>"      = gilt für das, was bei R1 ankommt
 show configuration commands | match "nat destination"
 # Destination NAT: welche Ports der öffentlichen Adresse wohin weitergeleitet werden
 
@@ -79,24 +84,26 @@ Lasttest starten (dauert 2 Minuten)
 Auf KUNDE:
 cd ~/lab/k6
 sudo docker run --rm -i grafana/k6:1.3.0 run - < weihnachten.js
+# grafana/k6 = Programm k6 vom Hersteller Grafana Labs (nicht Grafana selbst)
 # docker run --rm = k6 als Container starten, nach dem Test löschen
 # -i = Eingabe an den Container weiterreichen
 # run - = Testskript von der Eingabe lesen; < weihnachten.js = diese Datei
+# Der Test endet nach 2 Minuten (duration im Skript), dann endet der Container
 #
 # Zusammenfassung am Schluss lesen:
 #   THRESHOLDS            Zielwerte; Häkchen = erfüllt, Kreuz = verletzt
 #   http_req_duration     Antwortzeit; p(95)=... ist das 95. Perzentil
 #   http_req_failed       Anteil fehlgeschlagener Anfragen
-#   http_reqs             Anzahl Anfragen und erreichte Rate (.../s)
-#   dropped_iterations    Anfragen, die k6 gar nicht senden konnte, weil
-#                         alle virtuellen Benutzer noch auf Antworten warteten
+#   http_reqs             Anzahl Anfragen und tatsächlich erreichte Rate (.../s)
 # Meldungen "request timeout" oder Status 504 während des Tests:
 #   Der Shop antwortet nicht innerhalb der Wartezeit des Reverse Proxys.
 
 Während des Tests beobachten
-Grafana -> Kapazität Shop: CPU pro Container, Antwortzeit, Leitung
+Grafana -> Kapazität Shop: CPU pro Container, Antwortzeit, Internetanschluss
 # Gestrichelte Linien = CPU-Limit der Applikationsserver
 # Grafana läuft auf SRV-MON (Firefox), der Lasttest auf KUNDE
+# Panel "Antwortzeit" = Stichprobe (1 Anfrage alle paar Sekunden von SRV-MON).
+# Massgebend für L1 und L2 ist die Zusammenfassung von k6 (misst jede Anfrage).
 Mailpit: Mails des Monitorings
 
 Live-Ansicht der Container (optional)
@@ -124,23 +131,24 @@ Compose-Datei erweitern
 Auf SRV-WEB:
 cd /opt/shop
 sudo nano compose.yaml
-# Bausteine (Werte selbst bestimmen):
-#
-#   <dienst>:                      # Name des Dienstes
-#     image: <image>:<version>
-#     environment:
-#       <VARIABLE>: <wert>
-#     deploy:
-#       resources:
-#         limits:
-#           cpus: "<anteil>"       # Anteil CPUs, "1.0" = eine ganze CPU
-#           memory: <zahl>M        # Arbeitsspeicher in MB
-#     depends_on:
-#       - <dienst>                 # startet erst nach diesem Dienst
-#
+# Speichern: Ctrl+O, Enter · Beenden: Ctrl+X
+# Einrückung mit Leerzeichen, nie mit Tabulator.
 # Ein neuer Dienst braucht alles, was ein bestehender gleichartiger Dienst
 # hat: Image, Umgebungsvariablen, Secret, Netze, Abhängigkeiten, Neustart.
-# Einrückung mit Leerzeichen, nie mit Tabulator.
+
+----- Bausteine compose.yaml (kopieren, <...> ersetzen) ------------
+  <dienst>:                      # Name des Dienstes
+    image: <image>:<version>
+    environment:
+      <VARIABLE>: <wert>
+    deploy:
+      resources:
+        limits:
+          cpus: "<anteil>"       # Anteil CPUs, "1.0" = eine ganze CPU
+          memory: <zahl>M        # Arbeitsspeicher in MB
+    depends_on:
+      - <dienst>                 # startet erst nach diesem Dienst
+---------------------------------------------------------------------
 
 Compose-Datei prüfen und übernehmen
 Auf SRV-WEB:
@@ -157,28 +165,29 @@ nginx-Konfiguration erweitern
 Auf SRV-WEB:
 cd /opt/shop
 sudo nano nginx/default.conf
-# Bausteine (Werte selbst bestimmen):
-#
-#   proxy_cache_path <verzeichnis> levels=1:2 keys_zone=<zone>:<grösse>
-#                    max_size=<grösse> inactive=<zeit>;
-#   # gehört ausserhalb von server { ... }; Grössen z. B. 5m, 1g; Zeit z. B. 30m
-#   # keys_zone = Name und Arbeitsspeicher für die Schlüssel der Einträge
-#   # inactive  = so lange nicht abgerufen -> Eintrag wird entfernt
-#
-#   upstream <name> {
-#       server <dienst>:<port> weight=<zahl>;
-#   }
-#   # Anteil eines Servers = sein Gewicht ÷ Summe aller Gewichte
-#   # ohne weight gilt Gewicht 1
-#
-#   location <pfad> {
-#       proxy_pass http://<upstream>;
-#       proxy_cache <zone>;                       # Cache-Zone verwenden
-#       proxy_cache_valid <status> <zeit>;        # Gültigkeit im Cache
-#       add_header <Header-Name> $upstream_cache_status;
-#       # $upstream_cache_status = HIT (aus dem Cache), MISS, EXPIRED ...
-#   }
-#   # nginx wählt die location mit dem längsten passenden Pfad
+# default.conf wird im http-Block der Hauptdatei nginx.conf eingebunden.
+# proxy_cache_path und upstream stehen ausserhalb von server { ... }.
+# Grössen z. B. 5m, 100m, 1g · Zeiten z. B. 30m, 1h
+# keys_zone = Name und Arbeitsspeicher für die Schlüssel der Einträge
+# inactive  = so lange nicht abgerufen -> Eintrag wird entfernt
+# Anteil eines Servers = sein Gewicht ÷ Summe aller Gewichte; ohne weight gilt 1
+# $upstream_cache_status = HIT (aus dem Cache), MISS, EXPIRED ...
+# nginx wählt die location mit dem längsten passenden Pfad
+
+----- Bausteine nginx/default.conf (kopieren, <...> ersetzen) -------
+proxy_cache_path <verzeichnis> levels=1:2 keys_zone=<zone>:<grösse> max_size=<grösse> inactive=<zeit>;
+
+upstream <name> {
+    server <dienst>:<port> weight=<zahl>;
+}
+
+    location <pfad> {
+        proxy_pass http://<upstream>;
+        proxy_cache <zone>;
+        proxy_cache_valid <status> <zeit>;
+        add_header <Header-Name> $upstream_cache_status;
+    }
+---------------------------------------------------------------------
 
 nginx-Konfiguration prüfen und neu laden
 Auf SRV-WEB:
@@ -237,6 +246,7 @@ Gleicher Lasttest wie vorher (Ziellast unverändert)
 Auf KUNDE:
 cd ~/lab/k6
 sudo docker run --rm -i grafana/k6:1.3.0 run - < weihnachten.js
+# Ziellast erreicht? http_reqs (.../s) mit Ihrer Ziellast vergleichen
 
 Ausfall von app3 während des Tests
 Auf KUNDE:    Lasttest starten wie oben
