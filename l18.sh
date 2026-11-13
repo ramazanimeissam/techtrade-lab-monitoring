@@ -257,6 +257,14 @@ if [[ $ROLE == mon ]]; then
   iperf_install
   $APT install --no-install-recommends libreoffice-calc libreoffice-gtk3 >/dev/null
   echo "LibreOffice: $(dpkg-query -W -f='${Version}' libreoffice-calc)"
+  # Erststart-Hinweis ("running version ... for the first time") unterdrücken
+  LOV=$(dpkg-query -W -f='${Version}' libreoffice-calc | sed -E 's/^[0-9]+://; s/^([0-9]+\.[0-9]+).*/\1/')
+  sudo -u $U timeout 60 soffice --headless --terminate_after_init >/dev/null 2>&1 || true
+  REG=$H/.config/libreoffice/4/user/registrymodifications.xcu
+  if [[ -f $REG ]] && ! grep -q ooSetupLastVersion $REG; then
+    sed -i "s#</oor:items>#<item oor:path=\"/org.openoffice.Setup/Product\"><prop oor:name=\"ooSetupLastVersion\" oor:op=\"fuse\"><value>$LOV</value></prop></item>\n</oor:items>#" $REG
+  fi
+  echo "LibreOffice-Profil angelegt (Version $LOV)"
 
   log "Lastgenerator läuft auf KUNDE: alte k6-Dateien auf SRV-MON entfernen"
   rm -rf $H/lab/k6
@@ -303,30 +311,46 @@ PYEOF
   PUID=$PUID python3 > /tmp/l18-dashboard.json <<'PYEOF'
 import json, os
 P = {"type": "prometheus", "uid": os.environ["PUID"]}
-def ts(pid, title, targets, x, y, w, unit, desc, overrides=None, mn=0):
+def ts(pid, title, targets, x, y, w, unit, desc, overrides=None, mn=0, mx=None, extra=None):
+    d = {"unit": unit, "min": mn, "custom": {"lineWidth": 2}}
+    if mx is not None:
+        d["max"] = mx
+    if extra:
+        d.update(extra)
+        d["custom"]["thresholdsStyle"] = {"mode": "dashed"}
     return {"id": pid, "type": "timeseries", "title": title, "description": desc, "datasource": P,
             "gridPos": {"x": x, "y": y, "w": w, "h": 9},
             "targets": [dict(refId=chr(65 + i), datasource=P, **t) for i, t in enumerate(targets)],
-            "fieldConfig": {"defaults": {"unit": unit, "min": mn, "custom": {"lineWidth": 2}},
-                            "overrides": overrides or []}}
+            "fieldConfig": {"defaults": d, "overrides": overrides or []}}
 dash_limit = [{"matcher": {"id": "byRegexp", "options": "Limit.*"},
                "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}},
                               {"id": "custom.lineWidth", "value": 1}]}]
+lim100 = {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": None}, {"color": "red", "value": 100}]}}
+APPCPU = 'sum by (name) (rate(container_cpu_usage_seconds_total{name=~"shop-app.*"}[1m])) / max by (name) (container_spec_cpu_quota{name=~"shop-app.*"} / container_spec_cpu_period{name=~"shop-app.*"}) * 100'
+THROT = 'sum by (name) (rate(container_cpu_cfs_throttled_periods_total{name=~"shop-app.*"}[1m])) / sum by (name) (rate(container_cpu_cfs_periods_total{name=~"shop-app.*"}[1m])) * 100'
 panels = [
   ts(1, "Internetanschluss (R1 eth3)", [
        {"expr": 'rate(ifHCOutOctets{job="snmp", ifName="eth3"}[1m]) * 8 / 1e6', "legendFormat": "Upload (zum Internet)"},
        {"expr": 'rate(ifHCInOctets{job="snmp", ifName="eth3"}[1m]) * 8 / 1e6', "legendFormat": "Download (aus dem Internet)"}],
      0, 0, 12, "Mbit/s", "Durchsatz des Internetanschlusses in beide Richtungen, Mittel über 1 Minute (SNMP von R1)."),
-  ts(2, "CPU pro Shop-Container (% einer CPU)", [
-       {"expr": 'sum by (name) (rate(container_cpu_usage_seconds_total{name=~"shop-.*"}[1m])) * 100', "legendFormat": "{{name}}"},
-       {"expr": 'max by (name) (container_spec_cpu_quota{name=~"shop-app.*"} / container_spec_cpu_period{name=~"shop-app.*"}) * 100', "legendFormat": "Limit {{name}}"}],
-     12, 0, 12, "percent", "CPU-Verbrauch pro Container (cAdvisor). Gestrichelt: CPU-Limit der Applikationsserver.", dash_limit),
-  ts(3, "Shop-Antwortzeit aus Kundensicht", [
-       {"expr": 'probe_duration_seconds{job="shop"}', "legendFormat": "HTTP"}],
-     0, 9, 12, "s", "blackbox_exporter ruft den Shop alle 5 Sekunden auf."),
-  ts(4, "Arbeitsspeicher pro Shop-Container", [
+  ts(2, "CPU Applikationsserver (% ihres Limits)", [
+       {"expr": APPCPU, "legendFormat": "{{name}}"}],
+     12, 0, 12, "percent", "CPU-Verbrauch jedes Applikationsservers im Verhältnis zu seinem CPU-Limit. 100 % (rote Linie) = Limit erreicht. Mittel über 1 Minute, darum unter Volllast meist etwas unter 100 %.", None, 0, 110, lim100),
+  ts(3, "CPU-Drosselung Applikationsserver (%)", [
+       {"expr": THROT, "legendFormat": "{{name}}"}],
+     0, 9, 12, "percent", "Anteil der Zeitscheiben (je 100 ms), in denen der Kernel den Container bremsen musste, weil er sein CPU-Limit aufgebraucht hatte. Hoch = der Container will mehr CPU, als er darf.", None, 0, 100),
+  ts(4, "CPU Reverse Proxy und Datenbank (% einer CPU)", [
+       {"expr": 'sum by (name) (rate(container_cpu_usage_seconds_total{name=~"shop-(proxy|db).*"}[1m])) * 100', "legendFormat": "{{name}}"}],
+     12, 9, 12, "percent", "CPU-Verbrauch von Reverse Proxy und Datenbank in Prozent einer ganzen CPU (diese Container haben kein Limit)."),
+  ts(5, "Stichprobe: Antwortzeit des Shops", [
+       {"expr": 'probe_duration_seconds{job="shop"}', "legendFormat": "Antwortzeit"}],
+     0, 18, 12, "s", "Stichprobe: blackbox_exporter auf SRV-MON ruft den Shop alle paar Sekunden einmal auf. Zeigt die Zeit bis zu irgendeiner Antwort, auch bis zu einer Fehlermeldung. Immer zusammen mit dem Panel Erreichbarkeit lesen. Jede einzelne Anfrage misst nur k6."),
+  ts(6, "Stichprobe: Shop erreichbar (1 = ja, 0 = Fehler)", [
+       {"expr": 'probe_success{job="shop"}', "legendFormat": "erreichbar"}],
+     12, 18, 12, "none", "1 = die Stichprobe hat eine fehlerfreie Antwort erhalten (Status 200). 0 = Fehler oder keine Antwort.", None, 0, 1),
+  ts(7, "Arbeitsspeicher pro Shop-Container", [
        {"expr": 'max by (name) (container_memory_working_set_bytes{name=~"shop-.*"})', "legendFormat": "{{name}}"}],
-     12, 9, 12, "bytes", "Arbeitsspeicher pro Container (cAdvisor)."),
+     0, 27, 12, "bytes", "Arbeitsspeicher pro Container (cAdvisor)."),
 ]
 dash = {"uid": "kapazitaet-shop", "title": "Kapazität Shop", "tags": ["techtrade", "l18"],
         "timezone": "browser", "refresh": "10s", "schemaVersion": 39,

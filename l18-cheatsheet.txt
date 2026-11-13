@@ -136,7 +136,8 @@ sudo nano compose.yaml
 # Ein neuer Dienst braucht alles, was ein bestehender gleichartiger Dienst
 # hat: Image, Umgebungsvariablen, Secret, Netze, Abhängigkeiten, Neustart.
 
------ Bausteine compose.yaml (kopieren, <...> ersetzen) ------------
+----- Baustein A: NEUER Dienst unter services: (gleich eingerückt wie app2) -
+# Tipp: den ganzen Block app2 kopieren und anpassen
   <dienst>:                      # Name des Dienstes
     image: <image>:<version>
     environment:
@@ -146,8 +147,9 @@ sudo nano compose.yaml
         limits:
           cpus: "<anteil>"       # Anteil CPUs, "1.0" = eine ganze CPU
           memory: <zahl>M        # Arbeitsspeicher in MB
-    depends_on:
-      - <dienst>                 # startet erst nach diesem Dienst
+
+----- Baustein B: im BESTEHENDEN Dienst proxy unter depends_on: ergänzen -
+      - <dienst>                 # proxy startet erst nach diesem Dienst
 ---------------------------------------------------------------------
 
 Compose-Datei prüfen und übernehmen
@@ -174,15 +176,16 @@ sudo nano nginx/default.conf
 # $upstream_cache_status = HIT (aus dem Cache), MISS, EXPIRED ...
 # nginx wählt die location mit dem längsten passenden Pfad
 
------ Bausteine nginx/default.conf (kopieren, <...> ersetzen) -------
+----- Baustein A: NEUE Zeile, ganz oben (vor upstream) --------------
 proxy_cache_path <verzeichnis> levels=1:2 keys_zone=<zone>:<grösse> max_size=<grösse> inactive=<zeit>;
 
-upstream <name> {
+----- Baustein B: im BESTEHENDEN Block upstream shop_app ergänzen -----
+# bestehende Zeilen um weight=<zahl> ergänzen, eine Zeile neu:
     server <dienst>:<port> weight=<zahl>;
-}
 
+----- Baustein C: NEUER Block innerhalb server { }, nach location / { } -
     location <pfad> {
-        proxy_pass http://<upstream>;
+        proxy_pass http://shop_app;
         proxy_cache <zone>;
         proxy_cache_valid <status> <zeit>;
         add_header <Header-Name> $upstream_cache_status;
@@ -198,28 +201,27 @@ sudo docker compose exec proxy nginx -t
 sudo docker compose exec proxy nginx -s reload
 # -s reload = neue Konfiguration laden, ohne laufende Verbindungen zu trennen
 
-Verteilung prüfen: 40 Aufrufe der Shop-Seite
+Verteilung prüfen
 Auf SRV-WEB:
-for i in $(seq 1 40); do curl -sk -o /dev/null -D - https://localhost/ | grep -i x-backend; done | sort | uniq -c
-# for ... done = 40-mal wiederholen
-# curl -s = ohne Fortschrittsanzeige; -k = selbstsigniertes Zertifikat akzeptieren
-# -o /dev/null = Seite verwerfen; -D - = Antwort-Header anzeigen
-# grep -i x-backend = nur die Zeile X-Backend (-i = Gross/klein egal)
-# sort | uniq -c = gleiche Zeilen zählen
+curl -kI https://localhost/
+# -I = nur die Antwort-Header anzeigen; -k = selbstsigniertes Zertifikat akzeptieren
+# Zeile X-Backend = welcher Applikationsserver geantwortet hat
+# Befehl rund 8-mal wiederholen (Pfeil nach oben, Enter):
+# app3 sollte etwa jedes zweite Mal antworten, app1 und app2 je etwa jedes vierte Mal
 
 Cache prüfen
 Auf SRV-WEB:
-curl -sk -o /dev/null -D - https://localhost/static/shop.css | grep -i -E "x-cache|x-backend"
-# zweimal hintereinander ausführen und die Zeile X-Cache-Status vergleichen
-# -E = mehrere Suchbegriffe, getrennt mit |
-curl -sk -o /dev/null -D - https://localhost/ | grep -i x-cache
-# Shop-Seite: keine Ausgabe = keine Zeile X-Cache-Status
+curl -kI https://localhost/static/shop.css
+# zweimal ausführen und die Zeile X-Cache-Status vergleichen:
+# MISS = vom Applikationsserver geholt, HIT = aus dem Cache
+curl -kI https://localhost/
+# Shop-Seite: keine Zeile X-Cache-Status = wird nicht zwischengespeichert
 
 Shop von KUNDE aus über HTTP und HTTPS (öffentliche Adresse)
 Auf KUNDE:
-curl -s -o /dev/null -w "%{http_code}\n" http://203.0.113.1/
-curl -sk -o /dev/null -w "%{http_code}\n" https://203.0.113.1/
-# -w "%{http_code}\n" = nur den HTTP-Status ausgeben (200 = in Ordnung)
+curl -I http://203.0.113.1/
+curl -kI https://203.0.113.1/
+# erste Zeile: HTTP/1.1 200 OK = in Ordnung
 
 Logs bei Problemen
 Auf SRV-WEB:
@@ -246,7 +248,6 @@ Gleicher Lasttest wie vorher (Ziellast unverändert)
 Auf KUNDE:
 cd ~/lab/k6
 sudo docker run --rm -i grafana/k6:1.3.0 run - < weihnachten.js
-# Ziellast erreicht? http_reqs (.../s) mit Ihrer Ziellast vergleichen
 
 Ausfall von app3 während des Tests
 Auf KUNDE:    Lasttest starten wie oben
